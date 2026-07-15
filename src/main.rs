@@ -19,6 +19,7 @@ const HID_INFORMATION: Uuid = Uuid::from_u128(0x00002A4A_0000_1000_8000_00805F9B
 const HID_CONTROL_POINT: Uuid = Uuid::from_u128(0x00002A4C_0000_1000_8000_00805F9B34FB);
 const HID_BOOT_KEYBOARD_OUTPUT: Uuid = Uuid::from_u128(0x00002A32_0000_1000_8000_00805F9B34FB);
 const HID_BOOT_KEYBOARD_INPUT: Uuid = Uuid::from_u128(0x00002A22_0000_1000_8000_00805F9B34FB);
+const HID_PROTOCOL: Uuid = Uuid::from_u128(0x00002A4E_0000_1000_8000_00805F9B34FB);
 
 const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x05,0x01,0x09,0x06,0xA1,0x01,0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x08,0x81,0x02,0x95,0x01,0x75,0x08,0x81,0x01,0x95,0x05,0x75,0x01,0x05,0x08,0x19,0x01,0x29,0x05,0x91,0x02,0x95,0x01,0x75,0x03,0x91,0x01,0x95,0x06,0x75,0x08,0x15,0x00,0x25,0x65,0x05,0x07,0x19,0x00,0x29,0x65,0x81,0x00,0xC0
@@ -26,7 +27,7 @@ const REPORT_DESCRIPTOR: &'static [u8] = &[
 const HID_INFORMATION_BIN: &'static [u8] = &[
     0x01, 0x11, // HID spec
     0x00, // Country code
-    0b00000000 //flags
+    0b00000100 //flags
 ];
 
 #[tokio::main(flavor = "current_thread")]
@@ -55,6 +56,24 @@ async fn main() -> bluer::Result<()> {
             uuid: HID_SERVICE,
             primary: true,
             characteristics: vec![Characteristic {
+                uuid: HID_PROTOCOL,
+                read: Some(CharacteristicRead {
+                    read: true,
+                    fun: Box::new(|_request| Box::pin(async move {
+                        Ok(vec![0])
+                    })),
+                    ..Default::default()
+                }),
+                write: Some(CharacteristicWrite {
+                    write_without_response: true,
+                    method: CharacteristicWriteMethod::Fun(Box::new(|_value, _req| Box::pin(async move {
+                        println!("Ignoring write of {:?} to protocol by {} at {:?}", _value, _req.adapter_name, _req.device_address);
+                        Ok(())
+                    }))),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }, Characteristic {
                 uuid: HID_INFORMATION,
                 read: Some(CharacteristicRead {
                     read: true,
