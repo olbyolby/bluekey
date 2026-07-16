@@ -21,14 +21,43 @@ async fn main() -> bluer::Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     
+    let mut count = 0;
+    let mut sending = false;
+
     loop {
         tokio::select! {
-            _ = lines.next_line() => break,
-            _ = sleep(Duration::from_millis(25)) => {
-                println!("A pressed?");
-                let _ = board.press(0x04).await;
-                sleep(Duration::from_millis(10)).await;
-                let _ = board.release(0x04).await;
+            line = lines.next_line() => {
+                if let Ok(Some(text)) = line {
+                    if text == "send" {
+                        sending = true;
+                    } else if text == "don't" {
+                        sending = false;
+                    } else if text == "once" {
+                        let _ = board.press(0x04).await;
+                        sleep(Duration::from_millis(100)).await;
+                        let _ = board.release(0x04).await;
+                    }
+                } else {
+                    break
+                }
+            },
+            _ = sleep(Duration::from_millis(250)) => {
+                if sending {
+                    println!("A pressed?");
+                    if count % 5 == 0 {
+                        println!("Shift pressed?");
+                        let _ = board.press(0xE1).await;
+                    } 
+
+                    let _ = board.press(0x04).await;
+                    sleep(Duration::from_millis(100)).await;
+                    let _ = board.release(0x04).await;
+                    if count % 5 == 0 {
+                        let _ = board.release(0xE1).await;
+                    }
+
+                    count += 1;
+                }
             }
         }
     }

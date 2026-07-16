@@ -54,6 +54,9 @@ impl Into<u8> for Protocol {
 }
 
 // The amount of cloning bullshit I had to do here is going to drive me to extremism
+// Blur's callbacks want some werid cursed call signature and that gets repetitive to write.
+// First a clone needs to be made so it can be moved into the callback without consuming the state for everyone,
+// Then another copy as to be made into the async section of the callback because the async bit may outlive the function.
 macro_rules! callback {
     (|$($arg:ident),*| $state:ident $code:block) => {
         {
@@ -96,6 +99,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
        advertisement_type: bluer::adv::Type::Peripheral,
        service_uuids: [hid::KEYBOARD].into(),
        discoverable: Some(true),
+       appearance: Some(0x03C1),
 
        ..Default::default()
     }).await;
@@ -179,17 +183,27 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
         let mut state = state.write().await;
         match event {
             KeyboardEvent::PressKey(keycode) => {
-                if !state.keys.contains(&keycode) {
+                // Check if the key is a modifier 
+                if (0xE0..=0xE7).contains(&keycode) {
+                    let index = keycode - 0xE0;
+                    state.modifiers |= 0x1<<index;
+
+                    send_update(&mut state).await;
+                } else if !state.keys.contains(&keycode) {
                     if let Some(empty) = state.keys.iter().position(|k| *k == 0) {
                         state.keys[empty] = keycode;
 
                         send_update(&mut state).await;
                     };
-
                 }
             },
             KeyboardEvent::ReleaseKey(keycode) => {
-                if let Some(key) = state.keys.iter().position(|k| *k==keycode) {
+                if (0xE0..=0xE7).contains(&keycode) {
+                    let index = keycode - 0xE0;
+                    state.modifiers &= !(0x1<<index);
+
+                    send_update(&mut state).await;
+                } else if let Some(key) = state.keys.iter().position(|k| *k==keycode) {
                     state.keys[key] = 0;
                     send_update(&mut state).await;
                 }
@@ -206,12 +220,18 @@ async fn send_update(state: &mut KeyboardState) {
     let mut event = vec![state.modifiers, 0x00];
     event.extend_from_slice(&state.keys);
 
-    for listener in state.boot_input.iter_mut() {
-        let _ = listener.notify(event.clone()).await;
+    println!("event: {:?}", event);
+    let listeners = match state.protocol {
+        Protocol::Boot => &mut state.boot_input,
+        Protocol::Report => &mut state.report_input
     };
-    for listener in state.report_input.iter_mut() {
-        let _ = listener.notify(event.clone()).await;
-    }
+
+    listeners.retain(|l| !l.is_stopped());
+    for listener in listeners.iter_mut() {
+        if let Err(err) =  listener.notify(event.clone()).await {
+            println!("ERRR {:?} on {:?}", err, state.protocol);
+        }
+    };
 }
 
 
