@@ -1,8 +1,5 @@
-// Example of emulating a bluetooth device, makes a fake bluetooth battery
-use bluer::{Uuid,  
-    adv::Advertisement, 
-    gatt::{CharacteristicWriter, 
-        local::{Application, Characteristic, CharacteristicWrite, CharacteristicWriteMethod, CharacteristicControlEvent, CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, Service, characteristic_control}}};
+// A very awful, but technically functional, Bluetooth keyboard emulator(and an unused battery emulator)
+use bluer::{Uuid, adv::Advertisement, gatt::{CharacteristicWriter, WriteOp::Request, local::{Application, Characteristic, CharacteristicControlEvent, CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Descriptor, DescriptorRead, Service, characteristic_control}}};
 
 use futures::{FutureExt, StreamExt, pin_mut};
 use std::{sync::{Arc}, time::Duration};
@@ -13,6 +10,7 @@ use tokio::{
 };
 
 
+
 const HID_SERVICE: Uuid = Uuid::from_u128(0x00001812_0000_1000_8000_00805F9B34FB);
 const HID_REPORT_MAP: Uuid = Uuid::from_u128(0x00002A4B_0000_1000_8000_00805F9B34FB);
 const HID_INFORMATION: Uuid = Uuid::from_u128(0x00002A4A_0000_1000_8000_00805F9B34FB);
@@ -20,6 +18,8 @@ const HID_CONTROL_POINT: Uuid = Uuid::from_u128(0x00002A4C_0000_1000_8000_00805F
 const HID_BOOT_KEYBOARD_OUTPUT: Uuid = Uuid::from_u128(0x00002A32_0000_1000_8000_00805F9B34FB);
 const HID_BOOT_KEYBOARD_INPUT: Uuid = Uuid::from_u128(0x00002A22_0000_1000_8000_00805F9B34FB);
 const HID_PROTOCOL: Uuid = Uuid::from_u128(0x00002A4E_0000_1000_8000_00805F9B34FB);
+const HID_REPORT: Uuid = Uuid::from_u128(0x00002A4D_0000_1000_8000_00805F9B34FB);
+const REPORT_REFERENCE: Uuid = Uuid::from_u128(0x00002908_0000_1000_8000_00805F9B34FB);
 
 const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x05,0x01,0x09,0x06,0xA1,0x01,0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x08,0x81,0x02,0x95,0x01,0x75,0x08,0x81,0x01,0x95,0x05,0x75,0x01,0x05,0x08,0x19,0x01,0x29,0x05,0x91,0x02,0x95,0x01,0x75,0x03,0x91,0x01,0x95,0x06,0x75,0x08,0x15,0x00,0x25,0x65,0x05,0x07,0x19,0x00,0x29,0x65,0x81,0x00,0xC0
@@ -41,6 +41,7 @@ async fn main() -> bluer::Result<()> {
     let advertisement = Advertisement {
         advertisement_type: bluer::adv::Type::Peripheral,
         service_uuids: [HID_SERVICE].into(),
+        appearance: Some(0x03C1),
         discoverable: Some(true),
         local_name: Some("HID test".to_string()),
         ..Default::default()
@@ -51,6 +52,7 @@ async fn main() -> bluer::Result<()> {
     println!("Serving GATT HID service on Bluetooth adapter {}", adapter.name());
     let (hid_control_point_control, hid_control_point_handle) = characteristic_control();
     let (boot_keyboard_input_control, boot_keyboard_input_handle) = characteristic_control();
+    let (input_report_control, input_report_handle) = characteristic_control();
     let app = Application {
         services: vec![Service {
             uuid: HID_SERVICE,
@@ -59,7 +61,8 @@ async fn main() -> bluer::Result<()> {
                 uuid: HID_PROTOCOL,
                 read: Some(CharacteristicRead {
                     read: true,
-                    fun: Box::new(|_request| Box::pin(async move {
+                    fun: Box::new(|request| Box::pin(async move {
+                        println!("HID_PROTOCOL read by {} from {}", request.adapter_name, request.device_address);
                         Ok(vec![0])
                     })),
                     ..Default::default()
@@ -77,7 +80,8 @@ async fn main() -> bluer::Result<()> {
                 uuid: HID_INFORMATION,
                 read: Some(CharacteristicRead {
                     read: true,
-                    fun: Box::new(|_request| Box::pin(async move {
+                    fun: Box::new(|request| Box::pin(async move {
+                        println!("HID_INFORMATION read by {} from {}", request.adapter_name, request.device_address);
                         Ok(HID_INFORMATION_BIN.into())
                     })),
                     ..Default::default()
@@ -96,7 +100,8 @@ async fn main() -> bluer::Result<()> {
                 uuid: HID_REPORT_MAP,
                 read: Some(CharacteristicRead {
                     read: true,
-                    fun: Box::new(|_request| Box::pin(async move {
+                    fun: Box::new(|request| Box::pin(async move {
+                        println!("REPORT_MAP read by {} from {}", request.adapter_name, request.device_address);
                         Ok(REPORT_DESCRIPTOR.into())
                     })),
                     ..Default::default()
@@ -106,7 +111,8 @@ async fn main() -> bluer::Result<()> {
                 uuid: HID_BOOT_KEYBOARD_INPUT,
                 read: Some(CharacteristicRead {
                     read: true,
-                    fun: Box::new(|_request| Box::pin(async move {
+                    fun: Box::new(|request| Box::pin(async move {
+                        println!("BOOT_KEYBOARD_INPUT read by {} from {}", request.adapter_name, request.device_address);
                         Ok(vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
                     })),
                     ..Default::default()
@@ -130,6 +136,41 @@ async fn main() -> bluer::Result<()> {
                     ..Default::default()
                 }),
                 ..Default::default()
+            }, Characteristic {
+                uuid: HID_REPORT,
+                read: Some(CharacteristicRead {
+                    read: true,
+                    fun: Box::new(|request| 
+                        Box::pin(async move {
+                            println!("HID REPORT read by {} from {}", request.adapter_name, request.device_address);
+                            Ok(vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                        })
+                    ),
+                    ..Default::default()
+                }),
+                notify: Some(CharacteristicNotify {
+                    notify: true,
+                    method: CharacteristicNotifyMethod::Io,
+                    ..Default::default()
+                }),
+
+                control_handle: input_report_handle,
+                descriptors: vec![Descriptor {
+                    uuid: REPORT_REFERENCE,
+                    read: Some(DescriptorRead {
+                        read: true,
+                        fun: Box::new(|request| {
+                            Box::pin(async move {
+                                println!("Descirptor for HID_REPORT read by {}", request.device_address);
+                                Ok([0x00, 0x01].into())
+                            })
+                        }),
+
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
             }],
 
             ..Default::default()
@@ -144,24 +185,29 @@ async fn main() -> bluer::Result<()> {
 
     pin_mut!(hid_control_point_control);
     pin_mut!(boot_keyboard_input_control);
+    pin_mut!(input_report_control);
 
     let mut writer: Option<CharacteristicWriter> = None;
     
     loop {
         tokio::select! {
             _ = lines.next_line() => break,
-            _ = sleep(Duration::from_millis(25)) => {
+            _ = sleep(Duration::from_millis(250)) => {
                 if let Some(writer) = &writer {
+                    println!("A drown sent");
                     let _ = writer.send(&[0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]).await;
+                    sleep(Duration::from_millis(100)).await;
+                    println!("A up sent");
+                    let _ = writer.send(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).await;
                 }
             }
             event = hid_control_point_control.next() => {
                 if let Some(CharacteristicControlEvent::Write(req)) = event {
-                    println!("Write to hid control point");
+                    println!("Write to hid control point from {} on {}", req.device_address(), req.adapter_name());
                     match req.accept() {
                         Ok(reader) => {
                             match reader.recv().await {
-                                Ok(data) => println!("Read data: {:?}", data),
+                                Ok(data) => println!("Written data: {:?}", data),
                                 Err(error) => println!("Error reading data: {:?}", error)
                             };
 
@@ -177,6 +223,12 @@ async fn main() -> bluer::Result<()> {
                     writer = Some(new_writer);
                 }
                 
+            },
+            event = input_report_control.next() => {
+                if let Some(CharacteristicControlEvent::Notify(new_writer)) = event {
+                    println!("Attaching notifier for keyboard input");
+                    writer = Some(new_writer);
+                }
             }
         }
     }
