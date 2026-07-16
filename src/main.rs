@@ -9,7 +9,8 @@ use tokio::{
     sync::RwLock
 };
 
-
+mod hid;
+mod keyboard;
 
 const HID_SERVICE: Uuid = Uuid::from_u128(0x00001812_0000_1000_8000_00805F9B34FB);
 const HID_REPORT_MAP: Uuid = Uuid::from_u128(0x00002A4B_0000_1000_8000_00805F9B34FB);
