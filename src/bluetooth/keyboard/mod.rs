@@ -2,7 +2,7 @@ mod data;
 
 use std::sync::Arc;
 
-use crate::hid;
+use super::hid;
 use bluer::{Adapter, adv::Advertisement, gatt::local::{Application, CharacteristicNotifier, Service}};
 use tokio::sync::{RwLock, mpsc};
 
@@ -12,18 +12,33 @@ enum KeyboardEvent {
     ReleaseKey(u8)
 }
 
+
 pub struct Keyboard {
     channel: mpsc::Sender<KeyboardEvent>
 }
 impl Keyboard {
+    #[allow(dead_code)]
     pub async fn press(&self, keycode: u8) -> Result<(), ()> {
         match self.channel.send(KeyboardEvent::PressKey(keycode)).await {
             Ok(_) => Ok(()),
             Err(_) => Err(())
         }
     }
+    pub fn try_press(&self, keycode: u8) -> Result<(), ()> {
+        match self.channel.try_send(KeyboardEvent::PressKey(keycode)) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(())
+        }
+    }
+    #[allow(dead_code)]
     pub async fn release(&self, keycode: u8) -> Result<(), ()> {
-        match self.channel.send(KeyboardEvent::ReleaseKey(keycode)).await  {
+        match self.channel.send(KeyboardEvent::ReleaseKey(keycode)).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(())
+        }
+    }
+    pub fn try_release(&self, keycode: u8) -> Result<(), ()> {
+        match self.channel.try_send(KeyboardEvent::ReleaseKey(keycode)) {
             Ok(_) => Ok(()),
             Err(_) => Err(())
         }
@@ -67,6 +82,11 @@ macro_rules! callback {
             })
         }
     };
+    (|$($arg:ident),*| $code:block) => {
+        Box::new(move |$($arg),*| {
+            Box::pin(async move $code)
+        })
+    }
 }
 
 struct KeyboardState {
@@ -85,7 +105,7 @@ impl Default for KeyboardState {
 
             boot_input: Vec::new(),
             report_input: Vec::new(),
-            protocol: Protocol::Boot
+            protocol: Protocol::Report
         }
     }
 }
@@ -130,7 +150,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                     })
                 ),
                 characteristics::information(data::HID_INFORMATION),
-                characteristics::control_point(callback!(|value, _request| state {
+                characteristics::control_point(callback!(|value, _request| {
                     println!("Write control point by {} with {:?}", _request.device_address, value);
                     Ok(())
                 })),
@@ -149,11 +169,11 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                     })
                 ),
                 characteristics::boot_keyboard_output(
-                    callback!(|_request| state {
+                    callback!(|_request| {
                         println!("Boot keyboard output by {}", _request.device_address);
                         Ok(vec![0])
                     }),
-                    callback!(|value, read| state {
+                    callback!(|value, read| {
                         println!("Value {:?} from {}", value, read.device_address);
                         Ok(())
                     })
@@ -220,7 +240,7 @@ async fn send_update(state: &mut KeyboardState) {
     let mut event = vec![state.modifiers, 0x00];
     event.extend_from_slice(&state.keys);
 
-    println!("event: {:?}", event);
+    println!("event: {:?} mode: {:?}", event, state.protocol);
     let listeners = match state.protocol {
         Protocol::Boot => &mut state.boot_input,
         Protocol::Report => &mut state.report_input
@@ -236,14 +256,9 @@ async fn send_update(state: &mut KeyboardState) {
 
 
 mod characteristics {
-    use std::sync::Arc;
-
     use bluer::gatt::local::{Characteristic, CharacteristicNotify, CharacteristicNotifyFun, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
-use tokio::sync::RwLock;
 
-    use crate::hid;
-    use super::KeyboardState;
-    type State = Arc<RwLock<KeyboardState>>;
+    use super::hid;
     
     pub(super) fn protocol_mode(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
         

@@ -10,6 +10,7 @@ pub mod characteristics {
     pub const CONTROL_POINT: Uuid = Uuid::from_u128(0x00002A4C_0000_1000_8000_00805F9B34FB);
     pub mod boot {
         use bluer::Uuid;
+        #[allow(dead_code)]
         pub const MOUSE_OUTPUT: Uuid = Uuid::from_u128(0x00002A33_0000_1000_8000_00805F9B34FB);
 
         pub mod keyboard {
