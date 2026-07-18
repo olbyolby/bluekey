@@ -6,46 +6,15 @@ use evdev::{Device, EventSummary, KeyCode};
 
 mod bluetooth;
 
-
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> bluer::Result<()>  {
-    let local = tokio::task::LocalSet::new();
-    local.run_until(main2()).await
-}
-async fn main2() -> bluer::Result<()> {
-    let session = bluer::Session::new().await?;
-    let adapter = session.default_adapter().await?;
-    let board = bluetooth::keyboard::start_keyboard(adapter).await?;
-
-    println!("Press enter to quit");
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-
-    loop {
-        tokio::select! {
-            _ = lines.next_line() => break,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                board.press(0x04).await.unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                board.release(0x04).await.unwrap();
-            }            
-        }
-    }
-
-    Ok(())
-}
-
-
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum States {
     Stop,
     Run,
     Wait
 }
-//#[tokio::main(flavor = "current_thread")]
-async fn not_main() -> bluer::Result<()> {
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> bluer::Result<()> {
     //main2().await;
 
     println!("Creating keyboard interface");

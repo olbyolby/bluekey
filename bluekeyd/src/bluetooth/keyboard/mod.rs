@@ -3,8 +3,7 @@ mod data;
 use std::sync::Arc;
 
 use super::hid;
-use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicNotifier, Service}}};
-use futures::StreamExt;
+use bluer::{Adapter, adv::Advertisement, gatt::local::{Application, CharacteristicNotifier, Service}};
 use tokio::sync::{RwLock, mpsc};
 
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +58,7 @@ pub async fn start_keyboard(adapter: Adapter) -> bluer::Result<Keyboard> {
     let (sender, receiver) = mpsc::channel(16);
 
     // Create the keyboard server
-    tokio::task::spawn_local(keyboard_server(receiver, adapter));
+    tokio::spawn(keyboard_server(receiver, adapter));
 
     Ok(Keyboard { channel: sender })
 }
@@ -104,8 +103,8 @@ struct KeyboardState {
     modifiers: u8,
     leds: u8,
 
-    boot_input: Vec<CharacteristicWriter>,
-    report_input: Vec<CharacteristicWriter>,
+    boot_input: Vec<CharacteristicNotifier>,
+    report_input: Vec<CharacteristicNotifier>,
     protocol: Protocol
 }
 impl Default for KeyboardState {
@@ -135,39 +134,6 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
 
        ..Default::default()
     }).await.expect("Error creating advertisement");
-
-    // Notifiers require some nonsense to get device IDs(impossible in callback-based services)
-    let (boot_keyboard_input, boot_keyboard_input_control) = characteristics::boot_keyboard_input(
-        callback!(|_request| state {
-            let state = state.read().await;
-
-            println!("Read boot keyboard by {}", _request.device_address);
-            let mut data = vec![state.modifiers, 0x00];
-            data.extend_from_slice(&state.keys);
-            Ok(data)
-        }),
-        {
-            let state = state.clone();
-            async move |notifier|  {
-                state.write().await.boot_input.push(notifier);
-            }
-        }
-    );
-
-    let (report_input, report_input_control) = characteristics::input_report(
-        callback!(|_request| state {
-            let state = state.read().await;
-
-            println!("Report read by {}", _request.device_address);
-            let mut data = vec![state.modifiers, 0x00];
-            data.extend_from_slice(&state.keys);
-            Ok(data)
-        }),
-        async |notifier| {
-            println!("Report notiifer");
-            state.write().await.report_input.push(notifier)
-        });
-                
 
     // Create the GATT service
     let application_handle = adapter.serve_gatt_application(Application {
@@ -199,7 +165,19 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                     Ok(())
                 })),
                 characteristics::report_map(data::REPORT_DESCRIPTOR),
-                boot_keyboard_input,
+                characteristics::boot_keyboard_input(
+                    callback!(|_request| state {
+                        let state = state.read().await;
+
+                        println!("Read boot keyboard by {}", _request.device_address);
+                        let mut data = vec![state.modifiers, 0x00];
+                        data.extend_from_slice(&state.keys);
+                        Ok(data)
+                    }),
+                    callback!(|notifier| state {
+                        state.write().await.boot_input.push(notifier);
+                    })
+                ),
                 characteristics::boot_keyboard_output(
                     callback!(|_request| {
                         println!("Boot keyboard output by {}", _request.device_address);
@@ -210,7 +188,20 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                         Ok(())
                     })
                 ),
-                report_input,
+                characteristics::input_report(
+                    callback!(|_request| state {
+                        let state = state.read().await;
+
+                        println!("Report read by {}", _request.device_address);
+                        let mut data = vec![state.modifiers, 0x00];
+                        data.extend_from_slice(&state.keys);
+                        Ok(data)
+                    }),
+                    callback!(|notifier| state {
+                        println!("Report notiifer");
+                        state.write().await.report_input.push(notifier)
+                    })
+                ),
                 characteristics::output_report(
                     callback!(|request| state {
                         println!("LEDs read by {:?}", request.device_address);
@@ -228,20 +219,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
         ..Default::default()
     }).await.expect("Failed to start GATT server");
 
-    tokio::pin!(boot_keyboard_input_control);
-    tokio::pin!(report_input_control);
-    tokio::pin!(receiver);
-    let mut next = async move || {
-
-        loop {
-            tokio::select! {
-                _ = boot_keyboard_input_control.next() => (),
-                _ = report_input_control.next() => (),
-                event = receiver.recv() => return event
-            }
-        }
-    };
-    while let Some(event) = next().await {
+    while let Some(event) = receiver.recv().await {
         let mut state = state.write().await;
         match event {
             KeyboardEvent::PressKey(keycode) => {
@@ -287,9 +265,9 @@ async fn send_update(state: &mut KeyboardState) {
         Protocol::Report => &mut state.report_input
     };
 
-    listeners.retain(|l| !l.is_closed().unwrap_or(true));
+    listeners.retain(|l| !l.is_stopped());
     for listener in listeners.iter_mut() {
-        if let Err(err) =  listener.send(&event).await {
+        if let Err(err) =  listener.notify(event.clone()).await {
             println!("ERRR {:?} on {:?}", err, state.protocol);
         }
     };
@@ -297,10 +275,7 @@ async fn send_update(state: &mut KeyboardState) {
 
 
 mod characteristics {
-    use std::{rc::Rc, sync::Arc};
-
-use bluer::gatt::{CharacteristicWriter, local::{Characteristic, CharacteristicControlEvent, CharacteristicNotify, CharacteristicNotifyFun, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead, characteristic_control}};
-use futures::{Stream, StreamExt};
+    use bluer::gatt::local::{Characteristic, CharacteristicNotify, CharacteristicNotifyFun, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
 
     use super::hid;
     
@@ -360,21 +335,8 @@ use futures::{Stream, StreamExt};
         }
     }
 
-    pub(super) fn boot_keyboard_input<F: Send + Sync + AsyncFn(CharacteristicWriter) -> ()>(reader: CharacteristicReadFun, notifier: F) -> (Characteristic, impl Stream<Item=()>) {
-        let (control, handle) = characteristic_control();
-
-        let notifier = Arc::new(notifier);
-        let control = control.then(move |event| {
-            let notifier = notifier.clone();
-            async move {
-                if let CharacteristicControlEvent::Notify(source) = event {
-                    notifier(source).await;
-
-                }
-            }
-        });
-            
-        let characteristic = Characteristic {
+    pub(super) fn boot_keyboard_input(reader: CharacteristicReadFun, notifier: CharacteristicNotifyFun) -> Characteristic {
+        Characteristic {
             uuid: hid::characteristics::boot::keyboard::INPUT,
             read: Some(CharacteristicRead {
                 read: true,
@@ -383,14 +345,11 @@ use futures::{Stream, StreamExt};
             }),
             notify: Some(CharacteristicNotify {
                 notify: true,
-                method: CharacteristicNotifyMethod::Io,
+                method: CharacteristicNotifyMethod::Fun(notifier),
                 ..Default::default()
             }),
-            control_handle: handle,
             ..Default::default()
-        };
-        (characteristic, control)
-        
+        }
     }
     pub(super) fn boot_keyboard_output(reader: CharacteristicReadFun, writer: CharacteristicWriteFun) -> Characteristic {
         Characteristic {
@@ -409,20 +368,8 @@ use futures::{Stream, StreamExt};
             ..Default::default()
         }
     }
-    pub(super) fn input_report<F: AsyncFn(CharacteristicWriter) -> ()>(read: CharacteristicReadFun, mut notifier: F) -> (Characteristic, impl Stream<Item=()>) {
-        let (control, handle) = characteristic_control();
-        
-        let notifier = Rc::new(notifier);
-        let control = control.then(move |event| {
-            let notifier = notifier.clone();
-            async move {
-                if let CharacteristicControlEvent::Notify(source) = event {
-                    notifier(source).await
-                }
-            }
-        });
-
-        let characteristic = Characteristic {
+    pub(super) fn input_report(read: CharacteristicReadFun, notifier: CharacteristicNotifyFun) -> Characteristic {
+        Characteristic {
             uuid: hid::characteristics::REPORT,
             read: Some(CharacteristicRead {
                 read: true,
@@ -431,10 +378,9 @@ use futures::{Stream, StreamExt};
             }),
             notify: Some(CharacteristicNotify {
                 notify: true,
-                method: CharacteristicNotifyMethod::Io,
+                method: CharacteristicNotifyMethod::Fun(notifier),
                 ..Default::default()
             }),
-            control_handle: handle,
             descriptors: vec![Descriptor {
                 uuid: hid::descriptors::REPORT_REFERENCE,
                 read: Some(DescriptorRead {
@@ -451,9 +397,7 @@ use futures::{Stream, StreamExt};
                 ..Default::default()
             }],
             ..Default::default()
-        };
-
-        (characteristic, control)
+        }
     }
     pub(super) fn output_report(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
         Characteristic {

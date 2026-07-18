@@ -349,7 +349,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "nix",
- "tokio",
 ]
 
 [[package]]
