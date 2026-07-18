@@ -36,5 +36,5 @@ pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
 pub(super) const HID_INFORMATION: &'static [u8] = &[
     0x01, 0x11, // HID spec
     0x00, // Country code
-    0b00000100 //flags
+    0b00000010 //flags
 ];

@@ -6,41 +6,50 @@ use super::hid;
 use bluer::{Adapter, adv::Advertisement, gatt::local::{Application, CharacteristicNotifier, Service}};
 use tokio::sync::{RwLock, mpsc};
 
-
+#[derive(Clone, Copy, Debug)]
 enum KeyboardEvent {
     PressKey(u8),
     ReleaseKey(u8)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct KeyboardServerDied;
+#[derive(Clone, Copy, Debug)]
+pub enum KeyboardTrySendError {
+    ServerDied,
+    QueueFull
+}
 
 pub struct Keyboard {
     channel: mpsc::Sender<KeyboardEvent>
 }
 impl Keyboard {
     #[allow(dead_code)]
-    pub async fn press(&self, keycode: u8) -> Result<(), ()> {
+    pub async fn press(&self, keycode: u8) -> Result<(), KeyboardServerDied> {
         match self.channel.send(KeyboardEvent::PressKey(keycode)).await {
             Ok(_) => Ok(()),
-            Err(_) => Err(())
+            Err(mpsc::error::SendError(_)) => Err(KeyboardServerDied)
         }
     }
-    pub fn try_press(&self, keycode: u8) -> Result<(), ()> {
+    pub fn try_press(&self, keycode: u8) -> Result<(), KeyboardTrySendError> {
         match self.channel.try_send(KeyboardEvent::PressKey(keycode)) {
             Ok(_) => Ok(()),
-            Err(_) => Err(())
+            Err(mpsc::error::TrySendError::Full(_)) => Err(KeyboardTrySendError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(KeyboardTrySendError::ServerDied)
         }
     }
     #[allow(dead_code)]
-    pub async fn release(&self, keycode: u8) -> Result<(), ()> {
+    pub async fn release(&self, keycode: u8) -> Result<(), KeyboardServerDied> {
         match self.channel.send(KeyboardEvent::ReleaseKey(keycode)).await {
             Ok(_) => Ok(()),
-            Err(_) => Err(())
+            Err(mpsc::error::SendError(_)) => Err(KeyboardServerDied)
         }
     }
-    pub fn try_release(&self, keycode: u8) -> Result<(), ()> {
+    pub fn try_release(&self, keycode: u8) -> Result<(), KeyboardTrySendError> {
         match self.channel.try_send(KeyboardEvent::ReleaseKey(keycode)) {
             Ok(_) => Ok(()),
-            Err(_) => Err(())
+            Err(mpsc::error::TrySendError::Full(_)) => Err(KeyboardTrySendError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(KeyboardTrySendError::ServerDied)
         }
     }
 }
@@ -48,7 +57,7 @@ impl Keyboard {
 pub async fn start_keyboard(adapter: Adapter) -> bluer::Result<Keyboard> {
     let (sender, receiver) = mpsc::channel(16);
 
-    // Create the advertisement
+    // Create the keyboard server
     tokio::spawn(keyboard_server(receiver, adapter));
 
     Ok(Keyboard { channel: sender })
@@ -114,7 +123,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
     let state = Arc::new(RwLock::new(<KeyboardState as Default>::default()));
 
     // Start advertising the keyboard functionality
-    println!("Making advertisement");
+
     let advertisement_handle = adapter.advertise(Advertisement {
        advertisement_type: bluer::adv::Type::Peripheral,
        service_uuids: [hid::KEYBOARD].into(),
@@ -122,11 +131,10 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
        appearance: Some(0x03C1),
 
        ..Default::default()
-    }).await;
+    }).await.expect("Error creating advertisement");
 
     // Create the GATT service
-    println!("Application");
-    let app = Application {
+    let application_handle = adapter.serve_gatt_application(Application {
         services: vec![Service {
             uuid: hid::KEYBOARD,
             primary: true,
@@ -196,8 +204,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
             ..Default::default()
         }],
         ..Default::default()
-    };
-    let application_handle = adapter.serve_gatt_application(app).await;
+    }).await.expect("Failed to start GATT server");
 
     while let Some(event) = receiver.recv().await {
         let mut state = state.write().await;
@@ -231,7 +238,6 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
         }
     }
 
-    println!("Tearing down server");
     drop(advertisement_handle);
     drop(application_handle);
 }
@@ -240,7 +246,7 @@ async fn send_update(state: &mut KeyboardState) {
     let mut event = vec![state.modifiers, 0x00];
     event.extend_from_slice(&state.keys);
 
-    println!("event: {:?} mode: {:?}", event, state.protocol);
+    println!("Sending event {:?} on protocol {:?}", event, state.protocol);
     let listeners = match state.protocol {
         Protocol::Boot => &mut state.boot_input,
         Protocol::Report => &mut state.report_input
