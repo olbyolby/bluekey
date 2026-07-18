@@ -1,12 +1,3 @@
-[package]
-name = "bluekey"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-bluer = { version = "0.17.4", features = ["full"] }
-env_logger = "0.11.11"
-evdev = "0.13.2"
-futures = "0.3.32"
-keycode = "1.0.0"
-tokio = { version = "1.52.3", features = ["io-std"] }
+[workspace]
+members = ["bluekeyd", "bluekey"]
+resolver = "3"

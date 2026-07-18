@@ -112,6 +112,10 @@ dependencies = [
 [[package]]
 name = "bluekey"
 version = "0.1.0"
+
+[[package]]
+name = "bluekeyd"
+version = "0.1.0"
 dependencies = [
  "bluer",
  "env_logger",
