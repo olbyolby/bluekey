@@ -101,6 +101,7 @@ macro_rules! callback {
 struct KeyboardState {
     keys: [u8; 6],
     modifiers: u8,
+    leds: u8,
 
     boot_input: Vec<CharacteristicNotifier>,
     report_input: Vec<CharacteristicNotifier>,
@@ -111,6 +112,7 @@ impl Default for KeyboardState {
         KeyboardState {
             keys: [0,0,0,0,0,0],
             modifiers: 0,
+            leds: 0,
 
             boot_input: Vec::new(),
             report_input: Vec::new(),
@@ -186,7 +188,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                         Ok(())
                     })
                 ),
-                characteristics::report(
+                characteristics::input_report(
                     callback!(|_request| state {
                         let state = state.read().await;
 
@@ -199,6 +201,17 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                         println!("Report notiifer");
                         state.write().await.report_input.push(notifier)
                     })
+                ),
+                characteristics::output_report(
+                    callback!(|request| state {
+                        println!("LEDs read by {:?}", request.device_address);
+                        Ok(vec![state.read().await.leds])
+                    }),
+                    callback!(|data, request| state {
+                        println!("LEDs writen with {:?} by {:?}", data, request.device_address);
+                        state.write().await.leds = data[0];
+                        Ok(())
+                    }), 
                 )
             ],
             ..Default::default()
@@ -355,7 +368,7 @@ mod characteristics {
             ..Default::default()
         }
     }
-    pub(super) fn report(read: CharacteristicReadFun, notifier: CharacteristicNotifyFun) -> Characteristic {
+    pub(super) fn input_report(read: CharacteristicReadFun, notifier: CharacteristicNotifyFun) -> Characteristic {
         Characteristic {
             uuid: hid::characteristics::REPORT,
             read: Some(CharacteristicRead {
@@ -374,8 +387,40 @@ mod characteristics {
                     read: true,
                     fun: Box::new(|request| {
                         Box::pin(async move {
-                            println!("Descirptor for HID_REPORT read by {}", request.device_address);
+                            println!("Descirptor for HID_REPORT INPUT read by {}", request.device_address);
                             Ok([0x00, 0x01].into())
+                        })
+                    }),
+
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+    pub(super) fn output_report(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
+        Characteristic {
+            uuid: hid::characteristics::REPORT,
+            read: Some(CharacteristicRead {
+                read: true,
+                fun: read,
+                ..Default::default()
+            }),
+            write: Some(CharacteristicWrite {
+                write: true,
+                write_without_response: true,
+                method: CharacteristicWriteMethod::Fun(write),
+                ..Default::default()
+            }),
+            descriptors: vec![Descriptor {
+                uuid: hid::descriptors::REPORT_REFERENCE,
+                read: Some(DescriptorRead {
+                    read: true,
+                    fun: Box::new(|request| {
+                        Box::pin(async move {
+                            println!("Descirptor for HID_REPORT OUTPUT read by {}", request.device_address);
+                            Ok([0x00, 0x02].into())
                         })
                     }),
 

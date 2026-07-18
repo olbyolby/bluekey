@@ -27,18 +27,18 @@ async fn main() -> bluer::Result<()> {
     let mut lines = stdin.lines();
     
     println!("Pulling events");
-    let mut macros = Device::open("/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd").unwrap();
-    macros.grab().unwrap();
+    //let mut macros = Device::open("/dev/input/by-id/usb-Razer_Razer_Ornata_Chroma-event-kbd").unwrap();
+    //macros.grab().unwrap();
     
     let pair = Arc::new((Condvar::new(), Mutex::new(States::Run)));
     let pair2 = Arc::clone(&pair);
-    let pair3 = Arc::clone(&pair);
+    //let pair3 = Arc::clone(&pair);
 
     std::thread::spawn(move || {
         let (condvar, mutex) = &*pair2;
 
         let mut lock = mutex.lock().unwrap();
-        let mut device = Device::open("/dev/input/by-id/usb-Razer_Razer_Ornata_Chroma-event-kbd").unwrap();
+        let mut device = Device::open("/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd").unwrap();
         device.grab().unwrap();
 
         while *lock!=States::Stop {
@@ -64,7 +64,7 @@ async fn main() -> bluer::Result<()> {
                 device.ungrab().unwrap();
                 lock = condvar.wait(lock).unwrap();
                 if *lock == States::Run {
-                    device = Device::open("/dev/input/by-id/usb-Razer_Razer_Ornata_Chroma-event-kbd").unwrap();
+                    device = Device::open("/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd").unwrap();
                     device.grab().unwrap();
                 }
             }
@@ -73,6 +73,7 @@ async fn main() -> bluer::Result<()> {
             
         }
     });
+    /*
     std::thread::spawn(move || {
         let (condvar, mutex) = &*pair3;
         while *mutex.lock().unwrap() != States::Stop {
@@ -105,7 +106,7 @@ async fn main() -> bluer::Result<()> {
             }
         }
 
-    });
+    }); */
 
     loop {
         tokio::select! {
