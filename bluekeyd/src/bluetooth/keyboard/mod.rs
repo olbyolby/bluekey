@@ -1,15 +1,24 @@
 mod data;
+pub mod leds;
 
 use std::sync::Arc;
 
 use super::hid;
-use bluer::{Adapter, adv::Advertisement, gatt::local::{Application, CharacteristicNotifier, Service}};
+use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, CharacteristicNotifier, ReqError, Service, characteristic_control}}};
+use futures::{StreamExt, channel::mpsc::SendError};
 use tokio::sync::{RwLock, mpsc};
 
 #[derive(Clone, Copy, Debug)]
 enum KeyboardEvent {
     PressKey(u8),
     ReleaseKey(u8)
+}
+#[derive(Clone, Copy, Debug)]
+pub enum KeyboardReturnEvent {
+    LedOn(leds::Led),
+    LedOff(leds::Led),
+    Suspend,
+    Wake
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -21,7 +30,8 @@ pub enum KeyboardTrySendError {
 }
 
 pub struct Keyboard {
-    channel: mpsc::Sender<KeyboardEvent>
+    channel: mpsc::Sender<KeyboardEvent>,
+    returns: mpsc::Receiver<KeyboardReturnEvent>
 }
 impl Keyboard {
     #[allow(dead_code)]
@@ -52,15 +62,23 @@ impl Keyboard {
             Err(mpsc::error::TrySendError::Closed(_)) => Err(KeyboardTrySendError::ServerDied)
         }
     }
+
+    pub async fn next_event(&mut self) -> Result<KeyboardReturnEvent, KeyboardServerDied> {
+        match self.returns.recv().await {
+            Some(event) => Ok(event),
+            None => Err(KeyboardServerDied)
+        }
+    }
 }
 
 pub async fn start_keyboard(adapter: Adapter) -> bluer::Result<Keyboard> {
-    let (sender, receiver) = mpsc::channel(16);
+    let (keyboard_sender, keyboard_receiver) = mpsc::channel(16);
+    let (return_sender, return_receiver) = mpsc::channel(16);
 
     // Create the keyboard server
-    tokio::spawn(keyboard_server(receiver, adapter));
+    tokio::spawn(keyboard_server(keyboard_receiver, return_sender, adapter));
 
-    Ok(Keyboard { channel: sender })
+    Ok(Keyboard { channel: keyboard_sender, returns: return_receiver })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,11 +100,13 @@ impl Into<u8> for Protocol {
 // First a clone needs to be made so it can be moved into the callback without consuming the state for everyone,
 // Then another copy as to be made into the async section of the callback because the async bit may outlive the function.
 macro_rules! callback {
-    (|$($arg:ident),*| $state:ident $code:block) => {
+    (|$($arg:ident),*| $($state:ident),+ $code:block) => {
         {
-            let $state = $state.clone();
+            #[allow(unused_parens)] // Silence compiler lints about this
+            let ($($state),*) = ($($state.clone()),*);
             Box::new(move |$($arg),*| {
-                let $state = $state.clone();
+                #[allow(unused_parens)] 
+                let ($($state),*) = ($($state.clone()),*);
                 Box::pin(async move $code)
             })
         }
@@ -103,8 +123,8 @@ struct KeyboardState {
     modifiers: u8,
     leds: u8,
 
-    boot_input: Vec<CharacteristicNotifier>,
-    report_input: Vec<CharacteristicNotifier>,
+    boot_input: Vec<CharacteristicWriter>,
+    report_input: Vec<CharacteristicWriter>,
     protocol: Protocol
 }
 impl Default for KeyboardState {
@@ -121,7 +141,7 @@ impl Default for KeyboardState {
     }
 }
 
-async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: Adapter) {
+async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: mpsc::Sender<KeyboardReturnEvent>, adapter: Adapter) {
     let state = Arc::new(RwLock::new(<KeyboardState as Default>::default()));
 
     // Start advertising the keyboard functionality
@@ -136,6 +156,9 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
     }).await.expect("Error creating advertisement");
 
     // Create the GATT service
+
+    let (mut boot_input_control, boot_input_handle) = characteristic_control();
+    let (mut report_input_control, report_inport_handle) = characteristic_control();
     let application_handle = adapter.serve_gatt_application(Application {
         services: vec![Service {
             uuid: hid::KEYBOARD,
@@ -160,8 +183,13 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                     })
                 ),
                 characteristics::information(data::HID_INFORMATION),
-                characteristics::control_point(callback!(|value, _request| {
+                characteristics::control_point(callback!(|value, _request| return_sender {
                     println!("Write control point by {} with {:?}", _request.device_address, value);
+                    return_sender.send(match value[0] {
+                        0 => Ok(KeyboardReturnEvent::Suspend),
+                        1 => Ok(KeyboardReturnEvent::Wake),
+                        _ => Err(ReqError::Failed)
+                    }?).await.unwrap();
                     Ok(())
                 })),
                 characteristics::report_map(data::REPORT_DESCRIPTOR),
@@ -174,9 +202,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                         data.extend_from_slice(&state.keys);
                         Ok(data)
                     }),
-                    callback!(|notifier| state {
-                        state.write().await.boot_input.push(notifier);
-                    })
+                    boot_input_handle
                 ),
                 characteristics::boot_keyboard_output(
                     callback!(|_request| {
@@ -197,19 +223,34 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                         data.extend_from_slice(&state.keys);
                         Ok(data)
                     }),
-                    callback!(|notifier| state {
-                        println!("Report notiifer");
-                        state.write().await.report_input.push(notifier)
-                    })
+                    report_inport_handle
                 ),
                 characteristics::output_report(
                     callback!(|request| state {
                         println!("LEDs read by {:?}", request.device_address);
                         Ok(vec![state.read().await.leds])
                     }),
-                    callback!(|data, request| state {
+                    callback!(|data, request| state,return_sender {
+                        use leds::Led;
+
+                        let mut state = state.write().await;
                         println!("LEDs writen with {:?} by {:?}", data, request.device_address);
-                        state.write().await.leds = data[0];
+                        let now_on = data[0] & !state.leds;
+                        let now_off  = state.leds & !data[0];
+                        state.leds = data[0];
+                        drop(state);
+
+                        println!("off: {:b}, on: {:b}", now_off, now_on);
+                        for (id, led) in (1..=5).map(|i| (i, Led::try_from(i).unwrap())) {
+                            if (1<<id) & now_on != 0 {
+                                println!("{:?} went on", led);
+                                return_sender.send(KeyboardReturnEvent::LedOn(led)).await.unwrap();
+                            } else if (1<<id )& now_off != 0 {
+                                println!("{:?} went off", led);
+                                return_sender.send(KeyboardReturnEvent::LedOff(led)).await.unwrap();
+                            }
+                        }
+                                                
                         Ok(())
                     }), 
                 )
@@ -219,10 +260,30 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
         ..Default::default()
     }).await.expect("Failed to start GATT server");
 
-    while let Some(event) = receiver.recv().await {
+    // Combine the streams
+    enum Event {
+        Keyboard(KeyboardEvent),
+        BootReportNotify(CharacteristicWriter),
+        ReportNotify(CharacteristicWriter)
+    }
+    let mut events = async move || {
+        tokio::select! {
+            event = receiver.recv() => event.map(|event| Event::Keyboard(event)),
+            event = boot_input_control.next() => match event {
+                Some(CharacteristicControlEvent::Notify(writer)) => Some(Event::BootReportNotify(writer)),
+                _ => panic!("Invalid")
+            },
+            event = report_input_control.next() => match event {
+                Some(CharacteristicControlEvent::Notify(writer)) => Some(Event::ReportNotify(writer)),
+                _ => panic!("Invalid")
+            }
+        }
+    };
+
+    while let Some(event) = events().await {
         let mut state = state.write().await;
         match event {
-            KeyboardEvent::PressKey(keycode) => {
+            Event::Keyboard(KeyboardEvent::PressKey(keycode)) => {
                 // Check if the key is a modifier 
                 if (0xE0..=0xE7).contains(&keycode) {
                     let index = keycode - 0xE0;
@@ -237,7 +298,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                     };
                 }
             },
-            KeyboardEvent::ReleaseKey(keycode) => {
+            Event::Keyboard(KeyboardEvent::ReleaseKey(keycode)) => {
                 if (0xE0..=0xE7).contains(&keycode) {
                     let index = keycode - 0xE0;
                     state.modifiers &= !(0x1<<index);
@@ -247,7 +308,9 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: A
                     state.keys[key] = 0;
                     send_update(&mut state).await;
                 }
-            }
+            },
+            Event::BootReportNotify(writer) => state.boot_input.push(writer),
+            Event::ReportNotify(writer) => state.report_input.push(writer)
         }
     }
 
@@ -265,9 +328,9 @@ async fn send_update(state: &mut KeyboardState) {
         Protocol::Report => &mut state.report_input
     };
 
-    listeners.retain(|l| !l.is_stopped());
+    listeners.retain(|l| !l.is_closed().unwrap_or(true));
     for listener in listeners.iter_mut() {
-        if let Err(err) =  listener.notify(event.clone()).await {
+        if let Err(err) =  listener.send(&event).await {
             println!("ERRR {:?} on {:?}", err, state.protocol);
         }
     };
@@ -275,7 +338,7 @@ async fn send_update(state: &mut KeyboardState) {
 
 
 mod characteristics {
-    use bluer::gatt::local::{Characteristic, CharacteristicNotify, CharacteristicNotifyFun, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
+    use bluer::gatt::local::{Characteristic, CharacteristicControl, CharacteristicControlHandle, CharacteristicNotify, CharacteristicNotifyFun, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
 
     use super::hid;
     
@@ -335,7 +398,7 @@ mod characteristics {
         }
     }
 
-    pub(super) fn boot_keyboard_input(reader: CharacteristicReadFun, notifier: CharacteristicNotifyFun) -> Characteristic {
+    pub(super) fn boot_keyboard_input(reader: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
         Characteristic {
             uuid: hid::characteristics::boot::keyboard::INPUT,
             read: Some(CharacteristicRead {
@@ -345,9 +408,10 @@ mod characteristics {
             }),
             notify: Some(CharacteristicNotify {
                 notify: true,
-                method: CharacteristicNotifyMethod::Fun(notifier),
+                method: CharacteristicNotifyMethod::Io,
                 ..Default::default()
             }),
+            control_handle: handle,
             ..Default::default()
         }
     }
@@ -368,7 +432,7 @@ mod characteristics {
             ..Default::default()
         }
     }
-    pub(super) fn input_report(read: CharacteristicReadFun, notifier: CharacteristicNotifyFun) -> Characteristic {
+    pub(super) fn input_report(read: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
         Characteristic {
             uuid: hid::characteristics::REPORT,
             read: Some(CharacteristicRead {
@@ -378,9 +442,10 @@ mod characteristics {
             }),
             notify: Some(CharacteristicNotify {
                 notify: true,
-                method: CharacteristicNotifyMethod::Fun(notifier),
+                method: CharacteristicNotifyMethod::Io,
                 ..Default::default()
             }),
+            control_handle: handle,
             descriptors: vec![Descriptor {
                 uuid: hid::descriptors::REPORT_REFERENCE,
                 read: Some(DescriptorRead {

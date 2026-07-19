@@ -2,7 +2,9 @@
 // Now with the extremely jank capability to switch between devices!
 use std::sync::{Arc, Condvar, atomic::AtomicBool, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use evdev::{Device, EventSummary, KeyCode};
+use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode};
+
+use crate::bluetooth::keyboard::{Keyboard, KeyboardReturnEvent};
 
 mod bluetooth;
 
@@ -15,6 +17,70 @@ enum States {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> bluer::Result<()> {
+    let session = bluer::Session::new().await?;
+    let adapter = session.default_adapter().await?;
+
+    let mut device = Device::open("/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd").unwrap().into_event_stream().unwrap();
+    device.device_mut().grab().unwrap();
+    
+    let mut board = bluetooth::keyboard::start_keyboard(adapter).await?;
+
+    // Merge the 2 relevant streams
+    enum Event {
+        Evdev(InputEvent),
+        Board(KeyboardReturnEvent)
+    }
+    async fn streams(evdev: &mut EventStream, board: &mut Keyboard) -> Result<Event, ()> {
+        tokio::select!(
+            event = evdev.next_event() => match event {
+                Ok(event) => Ok(Event::Evdev(event)),
+                Err(_) => Err(())
+            },
+            event = board.next_event() => match event {
+                Ok(event) => Ok(Event::Board(event)),
+                Err(_) => Err(())
+            }
+        )
+    } 
+
+    while let Ok(event) = streams(&mut device, &mut board).await {
+        match event {
+            Event::Evdev(event) => {
+                if let EventSummary::Key(_, code, action) = event.destructure() {
+                    if let Ok(map) = keycode::KeyMap::from_key_mapping(keycode::KeyMapping::Evdev(code.0)) {
+                        let code: u8 = map.usb.try_into().unwrap();
+                        match action {
+                            0 => board.try_release(code).unwrap(),
+                            1 => board.try_press(code).unwrap(),
+                            _ => ()
+                        };
+                    } else {
+                        println!("Invalid key: {:?}", code);
+                    }
+                }
+            },
+            Event::Board(event) => match event {
+                KeyboardReturnEvent::LedOn(led) => {
+                    println!("LED on");
+                    device.device_mut().send_events(&[
+                        InputEvent::new(evdev::EventType::LED.0, led.into_id().into(), 1)
+                    ]).unwrap();
+                },
+                KeyboardReturnEvent::LedOff(led) => {
+                    println!("LED off");
+                    device.device_mut().send_events(&[
+                        InputEvent::new(evdev::EventType::LED.0, led.into_id().into(), 0)
+                    ]).unwrap();
+                },
+                _ => ()
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+async fn main_old() -> bluer::Result<()> {
     //main2().await;
 
     println!("Creating keyboard interface");
