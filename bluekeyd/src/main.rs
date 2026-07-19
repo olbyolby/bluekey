@@ -1,191 +1,134 @@
-// A very awful, but technically functional, Bluetooth keyboard emulator
-// Now with the extremely jank capability to switch between devices!
-use std::sync::{Arc, Condvar, atomic::AtomicBool, Mutex};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode};
+// An actually half decent Bluetooth keyboard emulator
+use evdev::{Device, EventSummary, InputEvent};
 
-use crate::bluetooth::keyboard::{Keyboard, KeyboardReturnEvent};
+use crate::{bluetooth::keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}};
 
 mod bluetooth;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum States {
-    Stop,
-    Run,
-    Wait
+#[derive(Debug)]
+enum EvdevBridgeError {
+    EvdevError(std::io::Error),
+    KeyboardError(KeyboardServerDied),
+    UnmappedKey(u16)
+}
+impl From<std::io::Error> for EvdevBridgeError {
+    fn from(value: std::io::Error) -> Self {
+        EvdevBridgeError::EvdevError(value)
+    }
+}
+impl From<KeyboardServerDied> for EvdevBridgeError {
+    fn from(value: KeyboardServerDied) -> Self {
+        EvdevBridgeError::KeyboardError(value)
+    }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> bluer::Result<()> {
-    let session = bluer::Session::new().await?;
-    let adapter = session.default_adapter().await?;
+async fn evdev_bridge(mut keyboard: Keyboard, device: Device) -> Result<(), EvdevBridgeError> {
+    let mut evdev_stream = device.into_event_stream()?;
 
-    let mut device = Device::open("/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd").unwrap().into_event_stream().unwrap();
-    device.device_mut().grab().unwrap();
-    
-    let mut board = bluetooth::keyboard::start_keyboard(adapter).await?;
-
-    // Merge the 2 relevant streams
-    enum Event {
-        Evdev(InputEvent),
-        Board(KeyboardReturnEvent)
-    }
-    async fn streams(evdev: &mut EventStream, board: &mut Keyboard) -> Result<Event, ()> {
-        tokio::select!(
-            event = evdev.next_event() => match event {
-                Ok(event) => Ok(Event::Evdev(event)),
-                Err(_) => Err(())
-            },
-            event = board.next_event() => match event {
-                Ok(event) => Ok(Event::Board(event)),
-                Err(_) => Err(())
-            }
-        )
-    } 
-
-    while let Ok(event) = streams(&mut device, &mut board).await {
-        match event {
-            Event::Evdev(event) => {
-                if let EventSummary::Key(_, code, action) = event.destructure() {
-                    if let Ok(map) = keycode::KeyMap::from_key_mapping(keycode::KeyMapping::Evdev(code.0)) {
-                        let code: u8 = map.usb.try_into().unwrap();
-                        match action {
-                            0 => board.try_release(code).unwrap(),
-                            1 => board.try_press(code).unwrap(),
-                            _ => ()
-                        };
-                    } else {
-                        println!("Invalid key: {:?}", code);
-                    }
-                }
-            },
-            Event::Board(event) => match event {
-                KeyboardReturnEvent::LedOn(led) => {
-                    println!("LED on");
-                    device.device_mut().send_events(&[
-                        InputEvent::new(evdev::EventType::LED.0, led.into_id().into(), 1)
-                    ]).unwrap();
-                },
-                KeyboardReturnEvent::LedOff(led) => {
-                    println!("LED off");
-                    device.device_mut().send_events(&[
-                        InputEvent::new(evdev::EventType::LED.0, led.into_id().into(), 0)
-                    ]).unwrap();
-                },
-                _ => ()
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-async fn main_old() -> bluer::Result<()> {
-    //main2().await;
-
-    println!("Creating keyboard interface");
-    let session = bluer::Session::new().await?;
-    let adapter = session.default_adapter().await?;
-    let board = bluetooth::keyboard::start_keyboard(adapter).await?;
-
-    println!("Press enter to quit");
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    
-    println!("Pulling events");
-    //let mut macros = Device::open("/dev/input/by-id/usb-Razer_Razer_Ornata_Chroma-event-kbd").unwrap();
-    //macros.grab().unwrap();
-    
-    let pair = Arc::new((Condvar::new(), Mutex::new(States::Run)));
-    let pair2 = Arc::clone(&pair);
-    //let pair3 = Arc::clone(&pair);
-
-    std::thread::spawn(move || {
-        let (condvar, mutex) = &*pair2;
-
-        let mut lock = mutex.lock().unwrap();
-        let mut device = Device::open("/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd").unwrap();
-        device.grab().unwrap();
-
-        while *lock!=States::Stop {
-            if *lock==States::Run {
-                drop(lock);
-                for event in device.fetch_events().unwrap() {
-                    if let EventSummary::Key(_, code, action) = event.destructure() {
-                        if let Ok(map) = keycode::KeyMap::from_key_mapping(keycode::KeyMapping::Evdev(code.0)) {
-                            let code: u8 = map.usb.try_into().unwrap();
-                            match action {
-                                0 => board.try_release(code).unwrap(),
-                                1 => board.try_press(code).unwrap(),
-                                _ => println!("Invalid action: {:?}", action)
-                            };
-                        } else {
-                            println!("Invalid key: {:?}", code);
-                        }
-                    }
-                    
-                }
-                lock = mutex.lock().unwrap();
-            } else {
-                device.ungrab().unwrap();
-                lock = condvar.wait(lock).unwrap();
-                if *lock == States::Run {
-                    device = Device::open("/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd").unwrap();
-                    device.grab().unwrap();
-                }
-            }
-
-
-            
-        }
-    });
-    /*
-    std::thread::spawn(move || {
-        let (condvar, mutex) = &*pair3;
-        while *mutex.lock().unwrap() != States::Stop {
-            for event in macros.fetch_events().unwrap() {
-                if let EventSummary::Key(_, code, 1) = event.destructure() {
-                    match code {
-                        KeyCode::KEY_ESC => {
-                            println!("Stopping");
-                            *mutex.lock().unwrap() = States::Stop;
-                            condvar.notify_all();
-                        },
-                        KeyCode::KEY_DELETE => {
-                            std::process::abort(); // Nuclear options
-                        }
-                        KeyCode::KEY_1 => {
-                            let mut lock = mutex.lock().unwrap();
-                            if *lock == States::Wait {
-                                println!("Starting events");
-                                *lock = States::Run;
-                                condvar.notify_all();
-                            } else if *lock == States::Run {
-                                println!("Stopping events");
-                                *lock = States::Wait;
-                                condvar.notify_all();
-                            }
-                        }
-                        _ => ()
-                    }
-                }
-            }
-        }
-
-    }); */
-
+    let mut super_down = false;
     loop {
         tokio::select! {
-            _ = lines.next_line() => break 
-            
+            event = evdev_stream.next_event() => {
+                if let EventSummary::Key(_, code, action) = event?.destructure() {
+                    if code == evdev::KeyCode::KEY_LEFTMETA {
+                        match action {
+                            0 => super_down = false,
+                            1 => super_down = true,
+                            _ => ()
+                        }
+                    }
+                    if code == evdev::KeyCode::KEY_ESC && action == 1 && super_down {
+                        return Ok(())
+                    }
+
+                    let map = keycode::KeyMap::from_key_mapping(keycode::KeyMapping::Evdev(code.0)).map_err(|()| EvdevBridgeError::UnmappedKey(code.0))?;
+                    let code: u8 = map.usb.try_into().expect("USB scancode is always 8 bits");
+                    match action {
+                        0 => keyboard.release(code).await?,
+                        1 => keyboard.press(code).await?,
+                        _ => ()
+                    };
+                    
+                }
+            },
+            event = keyboard.next_event() => {
+                match event? {
+                    KeyboardReturnEvent::LedOn(led) => set_led(evdev_stream.device_mut(), led, true)?,
+                    KeyboardReturnEvent::LedOff(led) => set_led(evdev_stream.device_mut(), led, false)?,
+                    _ => ()
+                }
+            }
         }
     }
+}
+fn set_led(device: &mut Device, led: bluetooth::leds::Led, on: bool) -> Result<(), std::io::Error> {
+    let on = match on {
+        true => 1,
+        false => 0
+    };
 
-    let (condvar, mutex) = &*pair;
-    *mutex.lock().unwrap() = States::Stop;
-    condvar.notify_all();
+    device.send_events(&[
+        InputEvent::new(evdev::EventType::LED.0, led.into_id().into(), on)
+    ])
+}
 
-    Ok(())
 
+enum Errors {
+    SessionAcquire(bluer::Error),
+    AdapterAcquire(bluer::Error),
+    DeviceOpen(std::io::Error),
+    DeviceGrab(std::io::Error),
+    BridgeError(EvdevBridgeError)
+}
+
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let mut args = std::env::args();
+
+    args.next();
+    let device = match args.next() {
+        Some(device) => device,
+        None => return println!("No device or option provided")
+    };
+    if let Some(_) = args.next() {
+        return println!("Too many arguments supplied");
+    }
     
+    if device == "-h" {
+        println!("bluekeyd [-h] device_path");
+        return 
+    }
+
+    // If grabing an in-use device, grab can happen before enter is released, leaving it stuck to the OS, so give a delay for that
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    println!("Type 'super/windows + esc' to break keyboard grab");
+    if let Err(error) = start(&device).await {
+        match error {
+            Errors::AdapterAcquire(e) => println!("Error estbalishing bluetooth connection.\nMessage: {}", e.message),
+            Errors::SessionAcquire(e) => println!("Error accessing bluetooth adapter.\nMessage: {}", e.message),
+            Errors::DeviceOpen(e) => println!("Error opening keyboard device(do you have permission?)\n{}", e),
+            Errors::DeviceGrab(e) => println!("Error grabing keyboard device(is it already grabbed?)\n{}", e),
+            Errors::BridgeError(e) => match e {
+                EvdevBridgeError::EvdevError(e) => println!("Error with evdev device.\n{}", e),
+                EvdevBridgeError::KeyboardError(_) => println!("Bluetooth keyboard service died."),
+                EvdevBridgeError::UnmappedKey(key) => println!("Unknown key(evdev id={}) received.", key)
+            }
+        }
+    }
+}
+
+async fn start(device: &str) -> Result<(), Errors>{
+    let session = bluer::Session::new().await.map_err(|e| Errors::SessionAcquire(e))?;
+    let adapter = session.default_adapter().await.map_err(|e| Errors::AdapterAcquire(e))?;
+
+    let mut device = Device::open(device).map_err(|e| Errors::DeviceOpen(e))?;
+    device.grab().map_err(|e| Errors::DeviceGrab(e))?;
+    
+    let board = bluetooth::keyboard::start_keyboard(adapter).await;
+
+    evdev_bridge(board, device).await.map_err(|e| Errors::BridgeError(e))?;
+    
+    Ok(())
 }

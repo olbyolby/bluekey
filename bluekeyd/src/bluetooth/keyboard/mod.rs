@@ -1,12 +1,12 @@
 mod data;
-pub mod leds;
 
 use std::sync::Arc;
 
 use super::hid;
-use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, CharacteristicNotifier, ReqError, Service, characteristic_control}}};
-use futures::{StreamExt, channel::mpsc::SendError};
+use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, ReqError, Service, characteristic_control}}};
+use futures::StreamExt;
 use tokio::sync::{RwLock, mpsc};
+use log::debug;
 
 #[derive(Clone, Copy, Debug)]
 enum KeyboardEvent {
@@ -15,8 +15,8 @@ enum KeyboardEvent {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum KeyboardReturnEvent {
-    LedOn(leds::Led),
-    LedOff(leds::Led),
+    LedOn(super::leds::Led),
+    LedOff(super::leds::Led),
     Suspend,
     Wake
 }
@@ -34,13 +34,13 @@ pub struct Keyboard {
     returns: mpsc::Receiver<KeyboardReturnEvent>
 }
 impl Keyboard {
-    #[allow(dead_code)]
     pub async fn press(&self, keycode: u8) -> Result<(), KeyboardServerDied> {
         match self.channel.send(KeyboardEvent::PressKey(keycode)).await {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(KeyboardServerDied)
         }
     }
+    #[allow(dead_code)]
     pub fn try_press(&self, keycode: u8) -> Result<(), KeyboardTrySendError> {
         match self.channel.try_send(KeyboardEvent::PressKey(keycode)) {
             Ok(_) => Ok(()),
@@ -48,13 +48,13 @@ impl Keyboard {
             Err(mpsc::error::TrySendError::Closed(_)) => Err(KeyboardTrySendError::ServerDied)
         }
     }
-    #[allow(dead_code)]
     pub async fn release(&self, keycode: u8) -> Result<(), KeyboardServerDied> {
         match self.channel.send(KeyboardEvent::ReleaseKey(keycode)).await {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(KeyboardServerDied)
         }
     }
+    #[allow(dead_code)]
     pub fn try_release(&self, keycode: u8) -> Result<(), KeyboardTrySendError> {
         match self.channel.try_send(KeyboardEvent::ReleaseKey(keycode)) {
             Ok(_) => Ok(()),
@@ -71,14 +71,14 @@ impl Keyboard {
     }
 }
 
-pub async fn start_keyboard(adapter: Adapter) -> bluer::Result<Keyboard> {
+pub async fn start_keyboard(adapter: Adapter) -> Keyboard {
     let (keyboard_sender, keyboard_receiver) = mpsc::channel(16);
     let (return_sender, return_receiver) = mpsc::channel(16);
 
     // Create the keyboard server
     tokio::spawn(keyboard_server(keyboard_receiver, return_sender, adapter));
 
-    Ok(Keyboard { channel: keyboard_sender, returns: return_receiver })
+    Keyboard { channel: keyboard_sender, returns: return_receiver }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,7 +96,7 @@ impl Into<u8> for Protocol {
 }
 
 // The amount of cloning bullshit I had to do here is going to drive me to extremism
-// Blur's callbacks want some werid cursed call signature and that gets repetitive to write.
+// Blur's callbacks want some weird cursed call signature and that gets repetitive to write.
 // First a clone needs to be made so it can be moved into the callback without consuming the state for everyone,
 // Then another copy as to be made into the async section of the callback because the async bit may outlive the function.
 macro_rules! callback {
@@ -166,11 +166,11 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
             characteristics: vec![
                 characteristics::protocol_mode(
                     callback!(|_request| state {
-                        println!("Read protocol by {}", _request.device_address);
+                        debug!("Read protocol by {}", _request.device_address);
                         Ok(vec![state.read().await.protocol.into()])
                     }),
                     callback!(|value, _request| state {
-                        println!("Write protocal by {} with {:?}", _request.device_address, value);
+                        debug!("Write protocal by {} with {:?}", _request.device_address, value);
                         let protocol = match value.get(0) {
                             Some(0) => Some(Protocol::Boot),
                             Some(1) => Some(Protocol::Report),
@@ -184,7 +184,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                 ),
                 characteristics::information(data::HID_INFORMATION),
                 characteristics::control_point(callback!(|value, _request| return_sender {
-                    println!("Write control point by {} with {:?}", _request.device_address, value);
+                    debug!("Write control point by {} with {:?}", _request.device_address, value);
                     return_sender.send(match value[0] {
                         0 => Ok(KeyboardReturnEvent::Suspend),
                         1 => Ok(KeyboardReturnEvent::Wake),
@@ -197,7 +197,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                     callback!(|_request| state {
                         let state = state.read().await;
 
-                        println!("Read boot keyboard by {}", _request.device_address);
+                        debug!("Read boot keyboard by {}", _request.device_address);
                         let mut data = vec![state.modifiers, 0x00];
                         data.extend_from_slice(&state.keys);
                         Ok(data)
@@ -206,11 +206,11 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                 ),
                 characteristics::boot_keyboard_output(
                     callback!(|_request| {
-                        println!("Boot keyboard output by {}", _request.device_address);
+                        debug!("Boot keyboard output by {}", _request.device_address);
                         Ok(vec![0])
                     }),
                     callback!(|value, read| {
-                        println!("Value {:?} from {}", value, read.device_address);
+                        debug!("Value {:?} from {}", value, read.device_address);
                         Ok(())
                     })
                 ),
@@ -218,7 +218,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                     callback!(|_request| state {
                         let state = state.read().await;
 
-                        println!("Report read by {}", _request.device_address);
+                        debug!("Report read by {}", _request.device_address);
                         let mut data = vec![state.modifiers, 0x00];
                         data.extend_from_slice(&state.keys);
                         Ok(data)
@@ -227,26 +227,26 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                 ),
                 characteristics::output_report(
                     callback!(|request| state {
-                        println!("LEDs read by {:?}", request.device_address);
+                        debug!("LEDs read by {:?}", request.device_address);
                         Ok(vec![state.read().await.leds])
                     }),
                     callback!(|data, request| state,return_sender {
-                        use leds::Led;
+                        use super::leds::Led;
 
                         let mut state = state.write().await;
-                        println!("LEDs writen with {:?} by {:?}", data, request.device_address);
+                        debug!("LEDs writen with {:?} by {:?}", data, request.device_address);
                         let now_on = data[0] & !state.leds;
                         let now_off  = state.leds & !data[0];
                         state.leds = data[0];
                         drop(state);
 
-                        println!("off: {:b}, on: {:b}", now_off, now_on);
+                        debug!("off: {:b}, on: {:b}", now_off, now_on);
                         for (id, led) in (1..=5).map(|i| (i, Led::try_from(i).unwrap())) {
                             if (1<<id) & now_on != 0 {
-                                println!("{:?} went on", led);
+                                debug!("{:?} went on", led);
                                 return_sender.send(KeyboardReturnEvent::LedOn(led)).await.unwrap();
                             } else if (1<<id )& now_off != 0 {
-                                println!("{:?} went off", led);
+                                debug!("{:?} went off", led);
                                 return_sender.send(KeyboardReturnEvent::LedOff(led)).await.unwrap();
                             }
                         }
@@ -322,7 +322,7 @@ async fn send_update(state: &mut KeyboardState) {
     let mut event = vec![state.modifiers, 0x00];
     event.extend_from_slice(&state.keys);
 
-    println!("Sending event {:?} on protocol {:?}", event, state.protocol);
+    debug!("Sending event {:?} on protocol {:?}", event, state.protocol);
     let listeners = match state.protocol {
         Protocol::Boot => &mut state.boot_input,
         Protocol::Report => &mut state.report_input
@@ -331,14 +331,15 @@ async fn send_update(state: &mut KeyboardState) {
     listeners.retain(|l| !l.is_closed().unwrap_or(true));
     for listener in listeners.iter_mut() {
         if let Err(err) =  listener.send(&event).await {
-            println!("ERRR {:?} on {:?}", err, state.protocol);
+            debug!("ERRR {:?} on {:?}", err, state.protocol);
         }
     };
 }
 
 
 mod characteristics {
-    use bluer::gatt::local::{Characteristic, CharacteristicControl, CharacteristicControlHandle, CharacteristicNotify, CharacteristicNotifyFun, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
+    use bluer::gatt::local::{Characteristic, CharacteristicControlHandle, CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
+    use log::debug;
 
     use super::hid;
     
@@ -452,7 +453,7 @@ mod characteristics {
                     read: true,
                     fun: Box::new(|request| {
                         Box::pin(async move {
-                            println!("Descirptor for HID_REPORT INPUT read by {}", request.device_address);
+                            debug!("Descirptor for HID_REPORT INPUT read by {}", request.device_address);
                             Ok([0x00, 0x01].into())
                         })
                     }),
@@ -484,7 +485,7 @@ mod characteristics {
                     read: true,
                     fun: Box::new(|request| {
                         Box::pin(async move {
-                            println!("Descirptor for HID_REPORT OUTPUT read by {}", request.device_address);
+                            debug!("Descirptor for HID_REPORT OUTPUT read by {}", request.device_address);
                             Ok([0x00, 0x02].into())
                         })
                     }),
