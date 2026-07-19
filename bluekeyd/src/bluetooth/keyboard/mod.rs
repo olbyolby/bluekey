@@ -2,7 +2,9 @@ mod data;
 
 use std::sync::Arc;
 
-use super::hid;
+use super::hid::{self, Protocol};
+use super::hid::characteristics::callback;
+
 use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, ReqError, Service, characteristic_control}}};
 use futures::StreamExt;
 use tokio::sync::{RwLock, mpsc};
@@ -71,7 +73,7 @@ impl Keyboard {
     }
 }
 
-pub async fn start_keyboard(adapter: Adapter) -> Keyboard {
+pub async fn start_keyboard(adapter: Arc<Adapter>) -> Keyboard {
     let (keyboard_sender, keyboard_receiver) = mpsc::channel(16);
     let (return_sender, return_receiver) = mpsc::channel(16);
 
@@ -81,42 +83,8 @@ pub async fn start_keyboard(adapter: Adapter) -> Keyboard {
     Keyboard { channel: keyboard_sender, returns: return_receiver }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Protocol {
-    Boot,
-    Report
-}
-impl Into<u8> for Protocol {
-    fn into(self) -> u8 {
-        match self {
-            Self::Boot => 0,
-            Self::Report => 1
-        }
-    }
-}
 
-// The amount of cloning bullshit I had to do here is going to drive me to extremism
-// Blur's callbacks want some weird cursed call signature and that gets repetitive to write.
-// First a clone needs to be made so it can be moved into the callback without consuming the state for everyone,
-// Then another copy as to be made into the async section of the callback because the async bit may outlive the function.
-macro_rules! callback {
-    (|$($arg:ident),*| $($state:ident),+ $code:block) => {
-        {
-            #[allow(unused_parens)] // Silence compiler lints about this
-            let ($($state),*) = ($($state.clone()),*);
-            Box::new(move |$($arg),*| {
-                #[allow(unused_parens)] 
-                let ($($state),*) = ($($state.clone()),*);
-                Box::pin(async move $code)
-            })
-        }
-    };
-    (|$($arg:ident),*| $code:block) => {
-        Box::new(move |$($arg),*| {
-            Box::pin(async move $code)
-        })
-    }
-}
+
 
 struct KeyboardState {
     keys: [u8; 6],
@@ -141,14 +109,13 @@ impl Default for KeyboardState {
     }
 }
 
-async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: mpsc::Sender<KeyboardReturnEvent>, adapter: Adapter) {
+async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: mpsc::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>) {
     let state = Arc::new(RwLock::new(<KeyboardState as Default>::default()));
 
     // Start advertising the keyboard functionality
-
     let advertisement_handle = adapter.advertise(Advertisement {
        advertisement_type: bluer::adv::Type::Peripheral,
-       service_uuids: [hid::KEYBOARD].into(),
+       service_uuids: [hid::definitions::SERVICE].into(),
        discoverable: Some(true),
        appearance: Some(0x03C1),
 
@@ -156,15 +123,14 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
     }).await.expect("Error creating advertisement");
 
     // Create the GATT service
-
     let (mut boot_input_control, boot_input_handle) = characteristic_control();
-    let (mut report_input_control, report_inport_handle) = characteristic_control();
+    let (mut report_input_control, report_input_handle) = characteristic_control();
     let application_handle = adapter.serve_gatt_application(Application {
         services: vec![Service {
-            uuid: hid::KEYBOARD,
+            uuid: hid::definitions::SERVICE,
             primary: true,
             characteristics: vec![
-                characteristics::protocol_mode(
+                hid::characteristics::protocol_mode(
                     callback!(|_request| state {
                         debug!("Read protocol by {}", _request.device_address);
                         Ok(vec![state.read().await.protocol.into()])
@@ -182,8 +148,8 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                         Ok(())
                     })
                 ),
-                characteristics::information(data::HID_INFORMATION),
-                characteristics::control_point(callback!(|value, _request| return_sender {
+                hid::characteristics::information(hid::HID_INFORMATION),
+                hid::characteristics::control_point(callback!(|value, _request| return_sender {
                     debug!("Write control point by {} with {:?}", _request.device_address, value);
                     return_sender.send(match value[0] {
                         0 => Ok(KeyboardReturnEvent::Suspend),
@@ -192,8 +158,8 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                     }?).await.unwrap();
                     Ok(())
                 })),
-                characteristics::report_map(data::REPORT_DESCRIPTOR),
-                characteristics::boot_keyboard_input(
+                hid::characteristics::report_map(data::REPORT_DESCRIPTOR),
+                hid::characteristics::boot_keyboard_input(
                     callback!(|_request| state {
                         let state = state.read().await;
 
@@ -204,7 +170,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                     }),
                     boot_input_handle
                 ),
-                characteristics::boot_keyboard_output(
+                hid::characteristics::boot_keyboard_output(
                     callback!(|_request| {
                         debug!("Boot keyboard output by {}", _request.device_address);
                         Ok(vec![0])
@@ -214,7 +180,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                         Ok(())
                     })
                 ),
-                characteristics::input_report(
+                hid::characteristics::input_report(
                     callback!(|_request| state {
                         let state = state.read().await;
 
@@ -223,9 +189,9 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                         data.extend_from_slice(&state.keys);
                         Ok(data)
                     }),
-                    report_inport_handle
+                    report_input_handle
                 ),
-                characteristics::output_report(
+                hid::characteristics::output_report(
                     callback!(|request| state {
                         debug!("LEDs read by {:?}", request.device_address);
                         Ok(vec![state.read().await.leds])
@@ -336,165 +302,3 @@ async fn send_update(state: &mut KeyboardState) {
     };
 }
 
-
-mod characteristics {
-    use bluer::gatt::local::{Characteristic, CharacteristicControlHandle, CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
-    use log::debug;
-
-    use super::hid;
-    
-    pub(super) fn protocol_mode(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
-        
-        Characteristic {
-            uuid: hid::characteristics::PROTOCOL_MODE,
-            read: Some(CharacteristicRead {
-                read: true,
-                fun: read,
-                ..Default::default()
-            }),
-            write: Some(CharacteristicWrite {
-                write_without_response: true,
-                method: CharacteristicWriteMethod::Fun(write),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    pub(super) fn information(descriptor: &'static [u8]) -> Characteristic {
-        Characteristic {
-            uuid: hid::characteristics::INFORMATION,
-            read: Some(CharacteristicRead {
-                read: true,
-                fun: Box::new(move |_request| Box::pin(async move {
-                    Ok(descriptor.into())
-                })),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-    pub(super) fn control_point(write: CharacteristicWriteFun) -> Characteristic {
-        Characteristic {
-            uuid: hid::characteristics::CONTROL_POINT,
-            write: Some(CharacteristicWrite { 
-                write_without_response: true,
-                method: CharacteristicWriteMethod::Fun(write),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-    pub(super) fn report_map(report_descripter: &'static [u8]) -> Characteristic {
-        Characteristic {
-            uuid: hid::characteristics::REPORT_MAP,
-            read: Some(CharacteristicRead {
-                read: true,
-                fun: Box::new(move |_rquest| Box::pin(async move {
-                    Ok(report_descripter.into())
-                })),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    pub(super) fn boot_keyboard_input(reader: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
-        Characteristic {
-            uuid: hid::characteristics::boot::keyboard::INPUT,
-            read: Some(CharacteristicRead {
-                read: true,
-                fun: reader,
-                ..Default::default()
-            }),
-            notify: Some(CharacteristicNotify {
-                notify: true,
-                method: CharacteristicNotifyMethod::Io,
-                ..Default::default()
-            }),
-            control_handle: handle,
-            ..Default::default()
-        }
-    }
-    pub(super) fn boot_keyboard_output(reader: CharacteristicReadFun, writer: CharacteristicWriteFun) -> Characteristic {
-        Characteristic {
-            uuid: hid::characteristics::boot::keyboard::OUTPUT,
-            read: Some(CharacteristicRead {
-                read: true,
-                fun: reader,
-                ..Default::default()
-            }),
-            write: Some(CharacteristicWrite {
-                write: true,
-                write_without_response: true,
-                method: CharacteristicWriteMethod::Fun(writer),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-    pub(super) fn input_report(read: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
-        Characteristic {
-            uuid: hid::characteristics::REPORT,
-            read: Some(CharacteristicRead {
-                read: true,
-                fun: read,
-                ..Default::default()
-            }),
-            notify: Some(CharacteristicNotify {
-                notify: true,
-                method: CharacteristicNotifyMethod::Io,
-                ..Default::default()
-            }),
-            control_handle: handle,
-            descriptors: vec![Descriptor {
-                uuid: hid::descriptors::REPORT_REFERENCE,
-                read: Some(DescriptorRead {
-                    read: true,
-                    fun: Box::new(|request| {
-                        Box::pin(async move {
-                            debug!("Descirptor for HID_REPORT INPUT read by {}", request.device_address);
-                            Ok([0x00, 0x01].into())
-                        })
-                    }),
-
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-    }
-    pub(super) fn output_report(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
-        Characteristic {
-            uuid: hid::characteristics::REPORT,
-            read: Some(CharacteristicRead {
-                read: true,
-                fun: read,
-                ..Default::default()
-            }),
-            write: Some(CharacteristicWrite {
-                write: true,
-                write_without_response: true,
-                method: CharacteristicWriteMethod::Fun(write),
-                ..Default::default()
-            }),
-            descriptors: vec![Descriptor {
-                uuid: hid::descriptors::REPORT_REFERENCE,
-                read: Some(DescriptorRead {
-                    read: true,
-                    fun: Box::new(|request| {
-                        Box::pin(async move {
-                            debug!("Descirptor for HID_REPORT OUTPUT read by {}", request.device_address);
-                            Ok([0x00, 0x02].into())
-                        })
-                    }),
-
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-    }
-}

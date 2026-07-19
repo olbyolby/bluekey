@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 // An actually half decent Bluetooth keyboard emulator
 use evdev::{Device, EventSummary, InputEvent};
+use tokio::io::AsyncBufReadExt;
 
-use crate::{bluetooth::keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}};
+use crate::bluetooth::{keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}, mouse::{Button, mouse_server}};
 
 mod bluetooth;
 
@@ -80,10 +83,98 @@ enum Errors {
     DeviceGrab(std::io::Error),
     BridgeError(EvdevBridgeError)
 }
+macro_rules! parse_error {
+    ($error:literal) => {
+        {
+            println!($error);
+            continue
+        }
+    };
+}
+macro_rules! parse_int {
+    ($iter:ident->$var:ident as $T:ty $code:block) => {
+        {
+            use std::num::IntErrorKind;
+            match $iter.next() {
+                Some(number) => match number.parse::<$T>() {
+                    Ok($var) => $code,
+                    Err(error) if *error.kind() == IntErrorKind::Empty => parse_error!("Expected integer"),
+                    Err(error) if *error.kind() == IntErrorKind::InvalidDigit => parse_error!("Invalid integer"),
+                    Err(error) if *error.kind() == IntErrorKind::NegOverflow => parse_error!("Integer too low"),
+                    Err(error) if *error.kind() == IntErrorKind::PosOverflow => parse_error!("Integer too high"),
+                    Err(error) if *error.kind() == IntErrorKind::Zero => panic!("Invalid error"),
+                    _ => parse_error!("Error parsing integer")
+                },
+                None => parse_error!("Expected argument")
+            }
+        }
+    }
+}
 
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    env_logger::init();
+
+    let session = bluer::Session::new().await.unwrap();
+    let adapter = Arc::new(session.default_adapter().await.unwrap());
+    
+    let mouse = bluetooth::mouse::Mouse::new(adapter.clone());
+    let board = bluetooth::keyboard::start_keyboard(adapter.clone()).await;
+
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+
+    loop {
+        let command = lines.next_line().await.unwrap().unwrap();
+        let mut words = command.split(' ');
+        
+        match words.next() {
+            Some("exit") => break,
+            Some("up") => parse_int!(words->distance as i8 {
+                mouse.moved(0, -distance).await.unwrap()
+            }),
+            Some("down") => parse_int!(words->distance as i8 {
+                mouse.moved(0, distance).await.unwrap()
+            }),
+            Some("left") => parse_int!(words->distance as i8 {
+                mouse.moved(-distance, 0).await.unwrap()
+            }),
+            Some("right") => parse_int!(words->distance as i8 {
+                mouse.moved(distance, 0).await.unwrap()
+            }),
+            Some("press") => parse_int!(words->id as u16 {
+                match id {
+                    0 => parse_error!("0 is not a valid mouse button"),
+                    _ => mouse.press(Button::from_id(1).unwrap()).await.unwrap()
+                }        
+            }),
+            Some("release") => parse_int!(words->id as u16 {
+                match id {
+                    0 => parse_error!("0 is not a valid mouse button"),
+                    _ => mouse.release(Button::from_id(1).unwrap()).await.unwrap()
+                }                
+            }),
+            Some("kpress") => parse_int!(words->code as u8 {
+                board.press(code).await.unwrap();
+            }),
+            Some("krelease") => parse_int!(words->code as u8 {
+                board.release(code).await.unwrap();
+            }),
+            Some(_) => parse_error!("Invalid error"),
+            None => continue
+
+        }
+
+    }
+
+}
+
+
+
+
+#[allow(dead_code)]
+async fn main2() {
     let mut args = std::env::args();
 
     args.next();
@@ -121,7 +212,7 @@ async fn main() {
 
 async fn start(device: &str) -> Result<(), Errors>{
     let session = bluer::Session::new().await.map_err(|e| Errors::SessionAcquire(e))?;
-    let adapter = session.default_adapter().await.map_err(|e| Errors::AdapterAcquire(e))?;
+    let adapter = Arc::new(session.default_adapter().await.map_err(|e| Errors::AdapterAcquire(e))?);
 
     let mut device = Device::open(device).map_err(|e| Errors::DeviceOpen(e))?;
     device.grab().map_err(|e| Errors::DeviceGrab(e))?;

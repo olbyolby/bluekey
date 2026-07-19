@@ -20,14 +20,18 @@ pub mod characteristics {
             pub const INPUT: Uuid = Uuid::from_u128(0x00002A22_0000_1000_8000_00805F9B34FB);
         }
     }
+
+    
 }
 
-pub const KEYBOARD: Uuid = Uuid::from_u128(0x00001812_0000_1000_8000_00805F9B34FB);
+pub const SERVICE: Uuid = Uuid::from_u128(0x00001812_0000_1000_8000_00805F9B34FB);
 
 pub mod descriptors {
     use bluer::Uuid;
 
     pub const REPORT_REFERENCE: Uuid = Uuid::from_u128(0x00002908_0000_1000_8000_00805F9B34FB);
 }
+
+
 
 

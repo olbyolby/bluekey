@@ -32,9 +32,3 @@ pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x81, 0x00,        //   Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
     0xC0,              // End Collection
 ];
-
-pub(super) const HID_INFORMATION: &'static [u8] = &[
-    0x01, 0x11, // HID spec
-    0x00, // Country code
-    0b00000010 //flags
-];
