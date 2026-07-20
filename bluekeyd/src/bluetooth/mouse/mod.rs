@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use bluer::gatt::CharacteristicWriter;
-use bluer::gatt::local::{Application, CharacteristicControlEvent, Service};
+use bluer::gatt::local::{Application, CharacteristicControlEvent, ReqError, Service};
 use bluer::{Adapter, adv::Advertisement, gatt::local::characteristic_control};
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use log::debug;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, mpsc};
 
 use super::hid::{self, Protocol};
@@ -53,27 +52,35 @@ pub enum TryMouseError {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum MouseEvent {
+enum MouseEvent {
     ButtonPress(Button),
     ButtonRelease(Button),
     Movement(i8, i8)
 }
+#[derive(Clone, Copy, Debug)]
+pub enum MouseReturnEvent {
+    Wake,
+    Suspend
+}
 
 pub struct Mouse {
     channel: mpsc::Sender<MouseEvent>,
-    returns: mpsc::Receiver<()>
+    returns: mpsc::Receiver<MouseReturnEvent>,
+    handle: tokio::task::JoinHandle<()>
 }
+#[allow(dead_code)]
 impl Mouse {
     pub fn new(adapter: Arc<Adapter>) -> Self {
         let (mouse_sender, mouse_receiver) = mpsc::channel(16);
         let (return_sender, return_receiver) = mpsc::channel(16);
 
         // Create the mouse server
-        tokio::spawn(mouse_server(mouse_receiver, adapter));
+        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender, adapter));
 
         Mouse {
             channel: mouse_sender,
-            returns: return_receiver
+            returns: return_receiver,
+            handle
         }
     }
 
@@ -83,10 +90,26 @@ impl Mouse {
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
         }
     }
+
+    pub fn try_press(&self, button: Button) -> Result<(), TryMouseError> {
+        match self.channel.try_send(MouseEvent::ButtonPress(button)) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TryMouseError::MouseServerDied),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
+        }
+    }
     pub async fn release(&self, button: Button) -> Result<(), MouseServerDied> {
         match self.channel.send(MouseEvent::ButtonRelease(button)).await {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
+        }
+    }
+
+    pub fn try_release(&self, button: Button) -> Result<(), TryMouseError> {
+        match self.channel.try_send(MouseEvent::ButtonRelease(button)) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TryMouseError::MouseServerDied),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
         }
     }
     pub async fn moved(&self, x: i8, y: i8) -> Result<(), MouseServerDied> {
@@ -94,6 +117,25 @@ impl Mouse {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
         }
+    }
+    
+    pub fn try_moved(&self, x: i8, y: i8) -> Result<(), TryMouseError> {
+        match self.channel.try_send(MouseEvent::Movement(x, y)) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TryMouseError::MouseServerDied),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
+        }
+    }
+
+    pub async fn next_event(&mut self) -> Result<MouseReturnEvent, MouseServerDied> {
+        match self.returns.recv().await {
+            Some(event) => Ok(event),
+            None => Err(MouseServerDied)
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.handle.abort();
     }
 }
 
@@ -126,7 +168,7 @@ impl MouseState {
             my as u8,
         ];
 
-        println!("Sending report {:?} on protocol {:?}", report, self.protocol);
+        //println!("Sending report {:?} on protocol {:?}", report, self.protocol);
         let notifiers = match self.protocol {
             Protocol::Boot => &mut self.boot,
             Protocol::Report => &mut self.report
@@ -142,8 +184,7 @@ impl MouseState {
 }
 
 
-pub async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, adapter: Arc<Adapter>) {
-    let return_sender = false;
+async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: mpsc::Sender<MouseReturnEvent>, adapter: Arc<Adapter>) {
     let state = Arc::new(RwLock::new(<MouseState as Default>::default()));
 
     // Start advertising the keyboard functionality
@@ -185,26 +226,29 @@ pub async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, adapter: Ar
                 hid::characteristics::information(super::hid::HID_INFORMATION),
                 hid::characteristics::control_point(callback!(|value, _request| return_sender {
                     debug!("Write control point by {} with {:?}", _request.device_address, value);
-                    /*return_sender.send(match value[0] {
-                        0 => Ok(KeyboardReturnEvent::Suspend),
-                        1 => Ok(KeyboardReturnEvent::Wake),
+                    return_sender.send(match value[0] {
+                        0 => Ok(MouseReturnEvent::Suspend),
+                        1 => Ok(MouseReturnEvent::Wake),
                         _ => Err(ReqError::Failed)
-                    }?).await.unwrap();*/
+                    }?).await.unwrap();
                     Ok(())
                 })),
                 hid::characteristics::report_map(data::REPORT_DESCRIPTOR),
                 hid::characteristics::boot_mouse_input(
-                    callback!(|request| {
-                        Ok(vec![0])
+                    callback!(|request| state {
+                        let state = state.read().await;
+
+                        debug!("Boot report  read by {}", request.device_address);
+                        Ok(vec![state.buttons, 0, 0])
                     }),
                     boot_input_handle
                 ),
                 hid::characteristics::input_report(
-                    callback!(|_request| state {
+                    callback!(|request| state {
                         let state = state.read().await;
 
-                        debug!("Report read by {}", _request.device_address);
-                        Ok(vec![0])
+                        debug!("Report read by {}", request.device_address);
+                        Ok(vec![state.buttons, 0, 0])
                     }),
                     report_input_handle
                 )
