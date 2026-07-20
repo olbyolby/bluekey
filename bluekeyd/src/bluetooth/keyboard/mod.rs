@@ -251,7 +251,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                 // Check if the key is a modifier 
                 if (0xE0..=0xE7).contains(&keycode) {
                     let index = keycode - 0xE0;
-                    state.modifiers |= 0x1<<index;
+                    state.modifiers |= 0x1<<index; // Set the modifier's bit field
 
                     send_update(&mut state).await;
                 } else if !state.keys.contains(&keycode) {
@@ -265,7 +265,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
             Event::Keyboard(KeyboardEvent::ReleaseKey(keycode)) => {
                 if (0xE0..=0xE7).contains(&keycode) {
                     let index = keycode - 0xE0;
-                    state.modifiers &= !(0x1<<index);
+                    state.modifiers &= !(0x1<<index); // Clear the modifier's bit field
 
                     send_update(&mut state).await;
                 } else if let Some(key) = state.keys.iter().position(|k| *k==keycode) {

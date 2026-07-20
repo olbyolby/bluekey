@@ -174,6 +174,7 @@ impl MouseState {
             Protocol::Report => &mut self.report
         };
 
+        // Remove dead nodifiers
         notifiers.retain(|l| !l.is_closed().unwrap_or(true)); // I fear is checking if the stream is closed errors, it's probably closed
         for notifier in notifiers {
             if let Err(err) = notifier.send(&report).await {

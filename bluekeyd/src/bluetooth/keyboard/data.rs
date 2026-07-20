@@ -1,3 +1,16 @@
+// HID Report descriptor for updates sent to the host, as per the following format.
+// Report structure: A standard 6KRO(up to 6 keys + modifiers at once)
+//   Modifier keys: 8 bits, LCtl, LShift, LAlt, LGui, RCtl, RShift, RAlt, RGui; 1 = down, 0 = up
+//   Buffer       : 1 byte, constant; 0x00
+//   Key 1        : 1 byte, key code; 0x00 = No keydown, see "Keyboard Page" of HID usage tables(pg 89) for more information
+//   key 2        :    .  ,    .    ;  .
+//   key 3        :    .  ,    .    ;  .
+//   key 4        :    .       .    ;  .
+//   key 5        :    .  ,    .    ;  .
+//   key 6        :    .  ,    .    ;  .
+// LED structure: Sent by host to update keyboard's LEDs
+//  LED states    : 5 bits, Num lock, Caps Lock, SCroll Lock, Compose, Kana; 1 = on, 0 = off, see "LED Page" of HID usage tables(pg 97)
+//  Buffer        : 3 bits, constant; 000  ^^^ 1 byte total
 pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x06,        // Usage (Keyboard)

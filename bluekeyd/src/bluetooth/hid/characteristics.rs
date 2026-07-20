@@ -4,7 +4,7 @@ use log::debug;
 use super::definitions;
 
 
-// The amount of cloning bullshit I had to do here is going to drive me to extremism
+// The amount of cloning nonsense I had to do here is going to drive me to extremism
 // Blur's callbacks want some weird cursed call signature and that gets repetitive to write.
 // First a clone needs to be made so it can be moved into the callback without consuming the state for everyone,
 // Then another copy as to be made into the async section of the callback because the async bit may outlive the function.
@@ -29,6 +29,8 @@ macro_rules! callback {
 }
 pub use crate::callback;
 
+// Required for any HID device implementing the boot protocol, allows host to set which protocol to use
+// Keyboard or mice should default to the boot protocal is supported
 pub fn protocol_mode(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
     
     Characteristic {
@@ -46,6 +48,7 @@ pub fn protocol_mode(read: CharacteristicReadFun, write: CharacteristicWriteFun)
         ..Default::default()
     }
 }
+// Required HID characteristic with some basic information about the device(localization and a few flags)
 pub fn information(descriptor: &'static [u8]) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::INFORMATION,
@@ -59,6 +62,7 @@ pub fn information(descriptor: &'static [u8]) -> Characteristic {
         ..Default::default()
     }
 }
+// Required HID characteristic, 0x01 written when host sleeps, 0x00 on wake
 pub fn control_point(write: CharacteristicWriteFun) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::CONTROL_POINT,
@@ -70,6 +74,7 @@ pub fn control_point(write: CharacteristicWriteFun) -> Characteristic {
         ..Default::default()
     }
 }
+// Required HID characteristic for supplying the HID Report descriptor to the host
 pub fn report_map(report_descripter: &'static [u8]) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::REPORT_MAP,
@@ -83,6 +88,7 @@ pub fn report_map(report_descripter: &'static [u8]) -> Characteristic {
         ..Default::default()
     }
 }
+// Allows a keyboard to support the boot protocol, used for simpler devices/OSes(like BIOSes or UEFIs)
 pub fn boot_keyboard_input(reader: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::boot::keyboard::INPUT,
@@ -100,6 +106,7 @@ pub fn boot_keyboard_input(reader: CharacteristicReadFun, handle: Characteristic
         ..Default::default()
     }
 }
+// Same as above but for writing LED states
 pub fn boot_keyboard_output(reader: CharacteristicReadFun, writer: CharacteristicWriteFun) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::boot::keyboard::OUTPUT,
@@ -117,6 +124,7 @@ pub fn boot_keyboard_output(reader: CharacteristicReadFun, writer: Characteristi
         ..Default::default()
     }
 }
+// Allows a mouse to work in boot mode, for things like UEFIs
 pub fn boot_mouse_input(reader: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::boot::MOUSE_OUTPUT,
@@ -134,6 +142,7 @@ pub fn boot_mouse_input(reader: CharacteristicReadFun, handle: CharacteristicCon
         ..Default::default()
     }
 }
+// Required HID characteristic for sending HID reports to the host
 pub fn input_report(read: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::REPORT,
@@ -165,6 +174,7 @@ pub fn input_report(read: CharacteristicReadFun, handle: CharacteristicControlHa
         ..Default::default()
     }
 }
+// HID Charactersitc allowing the host to send updates to the device(like LED updates)
 pub fn output_report(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::REPORT,

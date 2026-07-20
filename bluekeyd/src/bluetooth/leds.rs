@@ -33,6 +33,7 @@ macro_rules! make_table {
     }
 }
 
+// Big list of every keyboard LED supported by the USB standard
 #[derive(Clone, Copy, Debug)]
 pub struct InvalidId;
 make_table!(Led {
