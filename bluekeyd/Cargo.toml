@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bluer = { version = "0.17.4", features = ["full"] }
+clap = { version = "4.6.2", features = ["derive"] }
 env_logger = "0.11.11"
 evdev = { version = "0.13.2", features = ["tokio"] }
 futures = "0.3.32"

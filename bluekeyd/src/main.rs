@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 // An actually half decent Bluetooth keyboard emulator
 use evdev::{Device, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
-use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use std::{time::{Duration, Instant}, path::PathBuf};
+use clap::Parser;
 
 use crate::bluetooth::{keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}, mouse::{Button, Mouse, MouseServerDied}};
 
@@ -10,6 +12,7 @@ mod bluetooth;
 
 #[derive(Debug)]
 enum EvdevBridgeError {
+    #[allow(unused)]
     EvdevError(std::io::Error),
     ServerDied
 }
@@ -28,6 +31,7 @@ impl From<MouseServerDied> for EvdevBridgeError {
         EvdevBridgeError::ServerDied
     }
 }
+
 
 async fn evdev_keyboard_bridge(mut keyboard: Keyboard, device: Device) -> Result<(), EvdevBridgeError> {
     let mut evdev_stream = device.into_event_stream()?;
@@ -112,12 +116,11 @@ impl Clock {
     }
 }
 
-
-async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<(), EvdevBridgeError> {
+enum Never {}
+async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<Never, EvdevBridgeError> {
     let mut evdev_stream = device.into_event_stream()?;
     
-
-
+    // Immeidately sending all mouse events caused horrific lag and queue backup
     let mut movement_clock = Clock::new(Duration::from_millis(8));
     let mut x = 0;
     let mut y = 0;
@@ -130,14 +133,15 @@ async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<(), EvdevBri
         tokio::select! {
             event = evdev_stream.next_event() => match event {
                 Ok(event) => Ok(Event::Evdev(event.destructure())),
-                Err(_) => Err(())
+                Err(error) => Err(EvdevBridgeError::EvdevError(error))
             },
             _ = movement_clock.next(std::time::Instant::now()) => Ok(Event::MouseClock),
 
         }
     };
 
-    while let Ok(event) = next_event().await {
+    loop {
+        let event = next_event().await?;
         match event {
             Event::Evdev(EventSummary::Key(_, code, action)) if let Some(button) = map_button_codes(code) => match action {
                 0 => mouse.release(button).await?,
@@ -154,7 +158,7 @@ async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<(), EvdevBri
                 let mx = x.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
                 let my = y.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
 
-                mouse.moved(mx, my).await.unwrap();
+                mouse.moved(mx, my).await?;
                 x -= mx as i32;
                 y -= my as i32;
             },
@@ -162,91 +166,104 @@ async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<(), EvdevBri
         }
     }
 
-    Ok(())
 }
 
 
 
+#[derive(Parser)]
+#[command(name = "bluekeyd")]
+/// Pass a keyboard or mouse through an emulated Bluetooth device
+///
+/// Emulate a Bluetooth keyboard or mouse service from this computer,
+/// forwarding a keyboard or mouse on this device through it.
+/// Enables sharing a mouse or keyboard with another device via Bluetooth,
+/// without the need of a special app or software.
+struct Cli {
+    #[clap(flatten)]
+    devices: Devices,
 
-enum Errors {
-    SessionAcquire(bluer::Error),
-    AdapterAcquire(bluer::Error),
-    DeviceOpen(std::io::Error),
-    DeviceGrab(std::io::Error),
-    BridgeError(EvdevBridgeError)
+    
+    #[arg(long)]
+    /// Skip the short wait before grabing the keyboard, to avoid a stuck enter key
+    skip_wait: bool
 }
+#[derive(clap::Args)]
+#[group(required = true)]
+struct Devices {
+
+    #[arg(long, short)]
+    /// Path to keyboard device to forward
+    keyboard: Option<PathBuf>,
+    
+    #[arg(long, short)]
+    /// Path to mouse device to forward
+    mouse: Option<PathBuf>,
+}
+
+struct Aborter {
+    task: tokio::task::JoinHandle<Result<Never, EvdevBridgeError>>
+}
+impl Drop for Aborter {
+    fn drop(&mut self) {
+        self.task.abort(); // Summarily execute the task
+    }
+}
+
+#[derive(Debug)]
+struct Error(&'static str, Box<dyn std::fmt::Debug>);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    env_logger::init();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if let Err(Error(message, error)) = command().await {
+        println!("{}", message);
+        println!("Error: {:?}", error);
+    }
 
-    let session = bluer::Session::new().await.unwrap();
-    let adapter = Arc::new(session.default_adapter().await.unwrap());
-    
-    let mouse = bluetooth::mouse::Mouse::new(adapter.clone());
-    let board = bluetooth::keyboard::Keyboard::new(adapter.clone());
-
-    let mut mouse_device = evdev::Device::open("/dev/input/event23").unwrap();
-    let mut keyboard_device = evdev::Device::open("/dev/input/by-id/usb-Razer_Razer_Ornata_Chroma-event-kbd").unwrap();
-
-    mouse_device.grab().unwrap();
-    keyboard_device.grab().unwrap();
-
-    let mouse_bridge = tokio::spawn(evdev_mouse_bridge(mouse, mouse_device));
-    evdev_keyboard_bridge(board, keyboard_device).await.unwrap();
-    mouse_bridge.abort();
 }
+async fn command() -> Result<(), Error> {
+    let cli = Cli::parse();
 
-
-
-
-#[allow(dead_code)]
-async fn main2() {
-    let mut args = std::env::args();
-
-    args.next();
-    let device = match args.next() {
-        Some(device) => device,
-        None => return println!("No device or option provided")
-    };
-    if let Some(_) = args.next() {
-        return println!("Too many arguments supplied");
+    // A brief delay to avoid a stuck key(particularly enter) before grabbing keyboard
+    if !cli.skip_wait {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     
-    if device == "-h" {
-        println!("bluekeyd [-h] device_path");
-        return 
-    }
+    // Set up Bluetooth adapter and start evdev bridges
+    let session = bluer::Session::new().await.map_err(|e| Error("Unable to open Bluetooth session(Is BlueZ running?)", Box::new(e)))?;
+    let adapter = Arc::new(session.default_adapter().await.map_err(|e| Error("Unable to access Bluetooth adapter", Box::new(e)))?);
 
-    // If grabing an in-use device, grab can happen before enter is released, leaving it stuck to the OS, so give a delay for that
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mouse = cli.devices.mouse.map(|device| {
+        let mouse = Mouse::new(adapter.clone());
+        let mut device = Device::open(device)?;
+        device.grab()?;
 
-    println!("Type 'super/windows + esc' to break keyboard grab");
-    if let Err(error) = start(&device).await {
-        match error {
-            Errors::AdapterAcquire(e) => println!("Error estbalishing bluetooth connection.\nMessage: {}", e.message),
-            Errors::SessionAcquire(e) => println!("Error accessing bluetooth adapter.\nMessage: {}", e.message),
-            Errors::DeviceOpen(e) => println!("Error opening keyboard device(do you have permission?)\n{}", e),
-            Errors::DeviceGrab(e) => println!("Error grabing keyboard device(is it already grabbed?)\n{}", e),
-            Errors::BridgeError(e) => match e {
-                EvdevBridgeError::EvdevError(e) => println!("Error with evdev device.\n{}", e),
-                EvdevBridgeError::ServerDied => println!("Bluetooth keyboard service died."),
-            }
+        Ok(tokio::spawn(evdev_mouse_bridge(mouse, device)))
+    }).transpose().map_err(|e: std::io::Error| Error("Error in Bluetooth mouse bridge", Box::new(e)))?.map(|task| Aborter { task });
+    let keyboard = cli.devices.keyboard.map(|device| {
+        let keyboard = Keyboard::new(adapter.clone());
+        let mut device = Device::open(device)?;
+        device.grab()?;
+
+        Ok(tokio::spawn(evdev_keyboard_bridge(keyboard, device)))
+    }).transpose().map_err(|e: std::io::Error| Error("Error in Bluetooth keyboard bridge", Box::new(e)))?;
+
+
+    // If the keybaord is being used, exit via the keyboard(since you can't press enter if the keyboard is grabbed),
+    // otherwise, wait for enter. 
+    match keyboard {
+        None => {
+            let stdin = BufReader::new(tokio::io::stdin());
+            let mut lines = stdin.lines();
+            println!("Press enter to end forwarding");
+            lines.next_line().await.map_err(|e| Error("Error getting stdin", Box::new(e)))?;
+        },
+        Some(keyboard) => {
+            println!("Type 'super/windows + esc' to break keyboard grab");
+            keyboard.await.expect("Panic in keyboard server").map_err(|e| Error("Error in keyboard bridge", Box::new(e)))?;
         }
     }
-}
-
-async fn start(device: &str) -> Result<(), Errors>{
-    let session = bluer::Session::new().await.map_err(|e| Errors::SessionAcquire(e))?;
-    let adapter = Arc::new(session.default_adapter().await.map_err(|e| Errors::AdapterAcquire(e))?);
-
-    let mut device = Device::open(device).map_err(|e| Errors::DeviceOpen(e))?;
-    device.grab().map_err(|e| Errors::DeviceGrab(e))?;
     
-    let board = bluetooth::keyboard::Keyboard::new(adapter);
+    drop(mouse);
 
-    evdev_keyboard_bridge(board, device).await.map_err(|e| Errors::BridgeError(e))?;
-    
     Ok(())
 }
