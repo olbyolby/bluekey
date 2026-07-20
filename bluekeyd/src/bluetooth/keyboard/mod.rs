@@ -36,6 +36,17 @@ pub struct Keyboard {
     returns: mpsc::Receiver<KeyboardReturnEvent>
 }
 impl Keyboard {
+    pub fn new(adapter: Arc<Adapter>) -> Keyboard {
+        let (keyboard_sender, keyboard_receiver) = mpsc::channel(16);
+        let (return_sender, return_receiver) = mpsc::channel(16);
+
+        // Create the keyboard server
+        tokio::spawn(keyboard_server(keyboard_receiver, return_sender, adapter));
+
+        Keyboard { channel: keyboard_sender, returns: return_receiver }
+    }
+
+
     pub async fn press(&self, keycode: u8) -> Result<(), KeyboardServerDied> {
         match self.channel.send(KeyboardEvent::PressKey(keycode)).await {
             Ok(_) => Ok(()),
@@ -72,19 +83,6 @@ impl Keyboard {
         }
     }
 }
-
-pub async fn start_keyboard(adapter: Arc<Adapter>) -> Keyboard {
-    let (keyboard_sender, keyboard_receiver) = mpsc::channel(16);
-    let (return_sender, return_receiver) = mpsc::channel(16);
-
-    // Create the keyboard server
-    tokio::spawn(keyboard_server(keyboard_receiver, return_sender, adapter));
-
-    Keyboard { channel: keyboard_sender, returns: return_receiver }
-}
-
-
-
 
 struct KeyboardState {
     keys: [u8; 6],

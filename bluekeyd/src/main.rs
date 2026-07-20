@@ -185,7 +185,7 @@ async fn main() {
     let adapter = Arc::new(session.default_adapter().await.unwrap());
     
     let mouse = bluetooth::mouse::Mouse::new(adapter.clone());
-    let board = bluetooth::keyboard::start_keyboard(adapter.clone()).await;
+    let board = bluetooth::keyboard::Keyboard::new(adapter.clone());
 
     let mut mouse_device = evdev::Device::open("/dev/input/event23").unwrap();
     let mut keyboard_device = evdev::Device::open("/dev/input/by-id/usb-Razer_Razer_Ornata_Chroma-event-kbd").unwrap();
@@ -244,7 +244,7 @@ async fn start(device: &str) -> Result<(), Errors>{
     let mut device = Device::open(device).map_err(|e| Errors::DeviceOpen(e))?;
     device.grab().map_err(|e| Errors::DeviceGrab(e))?;
     
-    let board = bluetooth::keyboard::start_keyboard(adapter).await;
+    let board = bluetooth::keyboard::Keyboard::new(adapter);
 
     evdev_keyboard_bridge(board, device).await.map_err(|e| Errors::BridgeError(e))?;
     
