@@ -34,6 +34,7 @@ macro_rules! make_table {
 }
 
 // Big list of every keyboard LED supported by the USB standard
+// See HID usage tables "LEDs"(pg 97)
 #[derive(Clone, Copy, Debug)]
 pub struct InvalidId;
 make_table!(Led {
