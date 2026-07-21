@@ -1,3 +1,10 @@
+// HID Report descriptor for updates sent to the host, as per the following format.
+// Report structure: A standard mouse
+//   Buttons      : 3 bits, Primary , Secondary, Tertiary(Left, Right, Middle); 1 = down, 0 = up, see "Button Page" of HID usage tables(pg 110)
+//   Buffer       : 5 bits, Constant, 0b00000  ^^^ 1 byte total               ;
+//   X-movement   ; 1 byte, Relative Movement on the X-axis                   ; -127...127
+//   Y-movement   ; 1 byte, Relative Movement on the Y-axis                   ; -127...127
+// TODO: Add wheel support
 pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x02,        // Usage (Mouse)
@@ -22,6 +29,13 @@ pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x25, 0x7F,        //     Logical Maximum (127)
     0x75, 0x08,        //     Report Size (8)
     0x95, 0x02,        //     Report Count (2)
+    0x81, 0x06,        //     Input (Data,Var,Rel,No Wrap,Linear,Preferred State,No Null Position)
+    0x05, 0x01,        //     Usage Page (Generic Desktop)
+    0x09, 0x38,        //     Usage (Wheel)
+    0x15, 0x81,        //     Logical Minimum (-127)
+    0x25, 0x7F,        //     Logical Maximum (127)
+    0x95, 0x01,        //     Report Count (1)
+    0x75, 0x08,        //     Report Size (8)
     0x81, 0x06,        //     Input (Data,Var,Rel,No Wrap,Linear,Preferred State,No Null Position)
     0xC0,              //   End Collection
     0xC0,              // End Collection

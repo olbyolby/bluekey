@@ -55,7 +55,7 @@ pub enum TryMouseError {
 enum MouseEvent {
     ButtonPress(Button),
     ButtonRelease(Button),
-    Movement(i8, i8)
+    Movement(i8, i8, i8),
 }
 #[derive(Clone, Copy, Debug)]
 pub enum MouseReturnEvent {
@@ -112,15 +112,15 @@ impl Mouse {
             Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
         }
     }
-    pub async fn moved(&self, x: i8, y: i8) -> Result<(), MouseServerDied> {
-        match self.channel.send(MouseEvent::Movement(x, y)).await {
+    pub async fn moved(&self, x: i8, y: i8, scroll: i8) -> Result<(), MouseServerDied> {
+        match self.channel.send(MouseEvent::Movement(x, y, scroll)).await {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
         }
     }
     
-    pub fn try_moved(&self, x: i8, y: i8) -> Result<(), TryMouseError> {
-        match self.channel.try_send(MouseEvent::Movement(x, y)) {
+    pub fn try_moved(&self, x: i8, y: i8, scroll: i8) -> Result<(), TryMouseError> {
+        match self.channel.try_send(MouseEvent::Movement(x, y, scroll)) {
             Ok(_) => Ok(()),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(TryMouseError::MouseServerDied),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
@@ -150,7 +150,7 @@ struct MouseState {
 impl Default for MouseState {
     fn default() -> Self {
         MouseState { 
-            protocol: Protocol::Boot,
+            protocol: Protocol::Report,
             buttons: 0,
 
             report: Vec::new(),
@@ -159,25 +159,30 @@ impl Default for MouseState {
     }
 }
 impl MouseState {
-    async fn send_report(&mut self, movement: Option<(i8, i8)>) {
+    async fn send_report(&mut self, movement: Option<(i8, i8)>, wheel: Option<i8>) {
         let (mx, my) = movement.unwrap_or((0, 0));
+        let wheel = wheel.unwrap_or(0);
 
-        let report = [
-            self.buttons, // Current state of buttons
-            mx as u8, // Preserve bit pattern
-            my as u8,
-        ];
 
-        //println!("Sending report {:?} on protocol {:?}", report, self.protocol);
-        let notifiers = match self.protocol {
-            Protocol::Boot => &mut self.boot,
-            Protocol::Report => &mut self.report
+        
+        let (notifiers, report) = match self.protocol {
+            Protocol::Boot => (&mut self.boot, &[
+                self.buttons, // Current state of buttons
+                mx as u8, // Preserve bit pattern
+                my as u8,
+            ] as &[u8]),
+            Protocol::Report => (&mut self.report, &[
+                self.buttons, // Current state of buttons
+                mx as u8, // Preserve bit pattern
+                my as u8,
+                wheel as u8
+            ] as &[u8])
         };
-
+        //println!("Sending report on protocol {:?} to {:?}", self.protocol, notifiers);
         // Remove dead nodifiers
         notifiers.retain(|l| !l.is_closed().unwrap_or(true)); // I fear is checking if the stream is closed errors, it's probably closed
         for notifier in notifiers {
-            if let Err(err) = notifier.send(&report).await {
+            if let Err(err) = notifier.send(report).await {
                 debug!("ERRR {:?} on {:?}", err, self.protocol);
             }
         }
@@ -287,24 +292,24 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
         let mut state = state.write().await;
         match event {
             Event::BootReportNotify(writer) => state.boot.push(writer),
-            Event::ReportNotify(writer) => state.boot.push(writer),
+            Event::ReportNotify(writer) => state.report.push(writer),
             Event::MouseEvent(event) => match event {
                 MouseEvent::ButtonPress(button) => {
                     // Subtract one from button ID to account for button 1 being at bit 0
                     if (1..=3).contains(&button.into_u16()) && state.buttons & (1<<(button.into_u16()-1)) == 0 {
                         state.buttons |= 1<<(button.into_u16()-1);
-                        state.send_report(None).await;
+                        state.send_report(None, None).await;
                     }
                 },
                 MouseEvent::ButtonRelease(button) => {
                     // Subtract one from button ID to account for button 1 being at bit 0
                     if (1..=3).contains(&button.into_u16()) && state.buttons & (1<<(button.into_u16()-1)) != 0 {
                         state.buttons &= !(1<<(button.into_u16()-1));
-                        state.send_report(None).await;
+                        state.send_report(None, None).await;
                     }
                     
                 },
-                MouseEvent::Movement(x, y) => state.send_report(Some((x, y))).await
+                MouseEvent::Movement(x, y, scroll) => state.send_report(Some((x, y)), Some(scroll)).await,
             }
         }
     }

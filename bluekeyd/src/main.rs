@@ -124,7 +124,9 @@ async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<Never, Evdev
     let mut movement_clock = Clock::new(Duration::from_millis(8));
     let mut x = 0;
     let mut y = 0;
+    let mut scroll = 0;
 
+    #[derive(Debug)]
     enum Event {
         Evdev(EventSummary),
         MouseClock,
@@ -142,6 +144,7 @@ async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<Never, Evdev
 
     loop {
         let event = next_event().await?;
+        //println!("{:?}",event);
         match event {
             Event::Evdev(EventSummary::Key(_, code, action)) if let Some(button) = map_button_codes(code) => match action {
                 0 => mouse.release(button).await?,
@@ -154,14 +157,20 @@ async fn evdev_mouse_bridge(mouse: Mouse, device: Device) -> Result<Never, Evdev
             Event::Evdev(EventSummary::RelativeAxis(_, RelativeAxisCode::REL_Y, amount)) => {
                 y += amount;
             },
+            Event::Evdev(EventSummary::RelativeAxis(_, RelativeAxisCode::REL_WHEEL, amount)) => {
+                scroll += amount;
+            }
             Event::MouseClock => {
                 let mx = x.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
                 let my = y.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
+                let ms = scroll.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
 
-                mouse.moved(mx, my).await?;
+                mouse.moved(mx, my, ms).await?;
                 x -= mx as i32;
                 y -= my as i32;
+                scroll = 0;
             },
+
             _ => ()
         }
     }
