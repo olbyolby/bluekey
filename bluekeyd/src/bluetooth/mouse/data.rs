@@ -4,7 +4,7 @@
 //   Buffer       : 5 bits, Constant, 0b00000  ^^^ 1 byte total               ;
 //   X-movement   ; 1 byte, Relative Movement on the X-axis                   ; -127...127
 //   Y-movement   ; 1 byte, Relative Movement on the Y-axis                   ; -127...127
-// TODO: Add wheel support
+//   Wheel        ; 1 byte, Relative Movement of the scroll                   ; -127...127
 pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x02,        // Usage (Mouse)
