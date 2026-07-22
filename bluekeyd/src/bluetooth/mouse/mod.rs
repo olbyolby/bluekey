@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
+use bluer::Address;
 use bluer::gatt::CharacteristicWriter;
 use bluer::gatt::local::{Application, CharacteristicControlEvent, ReqError, Service};
 use bluer::{Adapter, adv::Advertisement, gatt::local::characteristic_control};
@@ -7,8 +8,11 @@ use futures::StreamExt;
 use log::debug;
 use tokio::sync::{RwLock, mpsc};
 
+use crate::bluetooth::{DeviceMap, Register};
+
 use super::hid::{self, Protocol};
 use super::hid::characteristics::callback;
+use super::Target;
 
 mod data;
 
@@ -53,20 +57,27 @@ pub enum TryMouseError {
 
 #[derive(Clone, Copy, Debug)]
 enum MouseEvent {
-    ButtonPress(Button),
-    ButtonRelease(Button),
-    Movement(i8, i8, i8),
+    ButtonPress(Target, Button),
+    ButtonRelease(Target, Button),
+    Movement(Target, i8, i8, i8),
 }
 #[derive(Clone, Copy, Debug)]
 pub enum MouseReturnEvent {
-    Wake,
-    Suspend
+    Register(Address),
+    Wake(Address),
+    Suspend(Address)
+}
+impl From<Register> for MouseReturnEvent {
+    fn from(value: Register) -> Self {
+        MouseReturnEvent::Register(value.0)
+    }
 }
 
 pub struct Mouse {
     channel: mpsc::Sender<MouseEvent>,
     returns: mpsc::Receiver<MouseReturnEvent>,
-    handle: tokio::task::JoinHandle<()>
+    handle: tokio::task::JoinHandle<()>,
+    state: Weak<RwLock<MouseServer>>
 }
 #[allow(dead_code)]
 impl Mouse {
@@ -75,52 +86,54 @@ impl Mouse {
         let (return_sender, return_receiver) = mpsc::channel(16);
 
         // Create the mouse server
-        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender, adapter));
+        let state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
+        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender, adapter, state.clone()));
 
         Mouse {
             channel: mouse_sender,
             returns: return_receiver,
+            state: Arc::downgrade(&state),
             handle
         }
     }
 
-    pub async fn press(&self, button: Button) -> Result<(), MouseServerDied> {
-        match self.channel.send(MouseEvent::ButtonPress(button)).await {
+    pub async fn press(&self, target: Target, button: Button) -> Result<(), MouseServerDied> {
+        match self.channel.send(MouseEvent::ButtonPress(target, button)).await {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
         }
     }
 
-    pub fn try_press(&self, button: Button) -> Result<(), TryMouseError> {
-        match self.channel.try_send(MouseEvent::ButtonPress(button)) {
+    pub fn try_press(&self, target: Target, button: Button) -> Result<(), TryMouseError> {
+        match self.channel.try_send(MouseEvent::ButtonPress(target, button)) {
             Ok(_) => Ok(()),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(TryMouseError::MouseServerDied),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
         }
     }
-    pub async fn release(&self, button: Button) -> Result<(), MouseServerDied> {
-        match self.channel.send(MouseEvent::ButtonRelease(button)).await {
+    pub async fn release(&self, target: Target, button: Button) -> Result<(), MouseServerDied> {
+        match self.channel.send(MouseEvent::ButtonRelease(target, button)).await {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
         }
     }
 
-    pub fn try_release(&self, button: Button) -> Result<(), TryMouseError> {
-        match self.channel.try_send(MouseEvent::ButtonRelease(button)) {
+    pub fn try_release(&self, target: Target, button: Button) -> Result<(), TryMouseError> {
+        match self.channel.try_send(MouseEvent::ButtonRelease(target, button)) {
             Ok(_) => Ok(()),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(TryMouseError::MouseServerDied),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
         }
     }
-    pub async fn moved(&self, x: i8, y: i8, scroll: i8) -> Result<(), MouseServerDied> {
-        match self.channel.send(MouseEvent::Movement(x, y, scroll)).await {
+    pub async fn moved(&self, target: Target, x: i8, y: i8, scroll: i8) -> Result<(), MouseServerDied> {
+        match self.channel.send(MouseEvent::Movement(target, x, y, scroll)).await {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
         }
     }
     
-    pub fn try_moved(&self, x: i8, y: i8, scroll: i8) -> Result<(), TryMouseError> {
-        match self.channel.try_send(MouseEvent::Movement(x, y, scroll)) {
+    pub fn try_moved(&self, target: Target, x: i8, y: i8, scroll: i8) -> Result<(), TryMouseError> {
+        match self.channel.try_send(MouseEvent::Movement(target, x, y, scroll)) {
             Ok(_) => Ok(()),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(TryMouseError::MouseServerDied),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TryMouseError::QueueFull),
@@ -139,33 +152,20 @@ impl Mouse {
     }
 }
 
-
-struct MouseState {
+type MouseServer = DeviceMap<IndividualMouse, MouseReturnEvent>;
+struct IndividualMouse {
     protocol: Protocol,
     buttons: u8,
 
-    report: Vec<CharacteristicWriter>,
-    boot: Vec<CharacteristicWriter>
+    report: Option<CharacteristicWriter>,
+    boot: Option<CharacteristicWriter>
 }
-impl Default for MouseState {
-    fn default() -> Self {
-        MouseState { 
-            protocol: Protocol::Report,
-            buttons: 0,
-
-            report: Vec::new(),
-            boot: Vec::new()
-        }
-    }
-}
-impl MouseState {
+impl IndividualMouse {
     async fn send_report(&mut self, movement: Option<(i8, i8)>, wheel: Option<i8>) {
         let (mx, my) = movement.unwrap_or((0, 0));
         let wheel = wheel.unwrap_or(0);
-
-
         
-        let (notifiers, report) = match self.protocol {
+        let (notifier, report) = match self.protocol {
             Protocol::Boot => (&mut self.boot, &[
                 self.buttons, // Current state of buttons
                 mx as u8, // Preserve bit pattern
@@ -178,20 +178,36 @@ impl MouseState {
                 wheel as u8
             ] as &[u8])
         };
-        //println!("Sending report on protocol {:?} to {:?}", self.protocol, notifiers);
-        // Remove dead nodifiers
-        notifiers.retain(|l| !l.is_closed().unwrap_or(true)); // I fear is checking if the stream is closed errors, it's probably closed
-        for notifier in notifiers {
+        //println!("Sending report on protocol {:?} to {:?}", self.protocol, notifier.as_ref().map(|v| v.device_address()));
+
+        if let Some(notifier) = notifier {
             if let Err(err) = notifier.send(report).await {
                 debug!("ERRR {:?} on {:?}", err, self.protocol);
             }
         }
     }
 }
+impl Default for IndividualMouse {
+    fn default() -> Self {
+        IndividualMouse {
+            protocol: Protocol::Report,
+            buttons: 0,
 
+            report: None,
+            boot: None
+        }   
+    }
+}
 
-async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: mpsc::Sender<MouseReturnEvent>, adapter: Arc<Adapter>) {
-    let state = Arc::new(RwLock::new(<MouseState as Default>::default()));
+const DEFAULT_STATE: IndividualMouse = IndividualMouse {
+    protocol: Protocol::Report,
+    buttons: 0,
+
+    boot: None,
+    report: None
+};
+
+async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: mpsc::Sender<MouseReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>) {
 
     // Start advertising the keyboard functionality
     let advertisement_handle = adapter.advertise(Advertisement {
@@ -212,29 +228,29 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
             primary: true,
             characteristics: vec![
                 hid::characteristics::protocol_mode(
-                    callback!(|_request| state {
-                        debug!("Read protocol by {}", _request.device_address);
-                        Ok(vec![state.read().await.protocol.into()])
+                    callback!(|request| state {
+                        debug!("Read protocol by {}", request.device_address);
+                        Ok(vec![state.read().await.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).protocol.into()])
                     }),
-                    callback!(|value, _request| state {
-                        debug!("Write protocal by {} with {:?}", _request.device_address, value);
+                    callback!(|value, request| state {
+                        debug!("Write protocal by {} with {:?}", request.device_address, value);
                         let protocol = match value.get(0) {
                             Some(0) => Some(Protocol::Boot),
                             Some(1) => Some(Protocol::Report),
                             _ => None
                         };
                         if let Some(protocol) = protocol {
-                            state.write().await.protocol = protocol;
+                            state.write().await.acquire_device(request.device_address).await.protocol = protocol;
                         };
                         Ok(())
                     })
                 ),
                 hid::characteristics::information(super::hid::HID_INFORMATION),
-                hid::characteristics::control_point(callback!(|value, _request| return_sender {
-                    debug!("Write control point by {} with {:?}", _request.device_address, value);
+                hid::characteristics::control_point(callback!(|value, request| return_sender {
+                    debug!("Write control point by {} with {:?}", request.device_address, value);
                     return_sender.send(match value[0] {
-                        0 => Ok(MouseReturnEvent::Suspend),
-                        1 => Ok(MouseReturnEvent::Wake),
+                        0 => Ok(MouseReturnEvent::Suspend(request.device_address)),
+                        1 => Ok(MouseReturnEvent::Wake(request.device_address)),
                         _ => Err(ReqError::Failed)
                     }?).await.unwrap();
                     Ok(())
@@ -245,7 +261,7 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
                         let state = state.read().await;
 
                         debug!("Boot report  read by {}", request.device_address);
-                        Ok(vec![state.buttons, 0, 0])
+                        Ok(vec![state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).buttons, 0, 0])
                     }),
                     boot_input_handle
                 ),
@@ -254,7 +270,7 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
                         let state = state.read().await;
 
                         debug!("Report read by {}", request.device_address);
-                        Ok(vec![state.buttons, 0, 0])
+                        Ok(vec![state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).buttons, 0, 0])
                     }),
                     report_input_handle
                 )
@@ -291,25 +307,40 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
     while let Some(event) = events().await {
         let mut state = state.write().await;
         match event {
-            Event::BootReportNotify(writer) => state.boot.push(writer),
-            Event::ReportNotify(writer) => state.report.push(writer),
+            Event::BootReportNotify(writer) => {
+                let state = state.acquire_device(writer.device_address()).await;
+                state.boot = Some(writer)
+            },
+            Event::ReportNotify(writer) => {
+                let state = state.acquire_device(writer.device_address()).await;
+                state.report = Some(writer)
+            },
             Event::MouseEvent(event) => match event {
-                MouseEvent::ButtonPress(button) => {
-                    // Subtract one from button ID to account for button 1 being at bit 0
-                    if (1..=3).contains(&button.into_u16()) && state.buttons & (1<<(button.into_u16()-1)) == 0 {
-                        state.buttons |= 1<<(button.into_u16()-1);
-                        state.send_report(None, None).await;
+                MouseEvent::ButtonPress(target, button) => {
+                    
+                    for device in state.get_targets(target) {
+                        // Subtract one from button ID to account for button 1 being at bit 0
+                        if (1..=3).contains(&button.into_u16()) && device.buttons & (1<<(button.into_u16()-1)) == 0 {
+                            device.buttons |= 1<<(button.into_u16()-1);
+                            device.send_report(None, None).await;
+                        }
                     }
                 },
-                MouseEvent::ButtonRelease(button) => {
-                    // Subtract one from button ID to account for button 1 being at bit 0
-                    if (1..=3).contains(&button.into_u16()) && state.buttons & (1<<(button.into_u16()-1)) != 0 {
-                        state.buttons &= !(1<<(button.into_u16()-1));
-                        state.send_report(None, None).await;
+                MouseEvent::ButtonRelease(target, button) => {
+                    for device in state.get_targets(target) {
+                        // Subtract one from button ID to account for button 1 being at bit 0
+                        if (1..=3).contains(&button.into_u16()) && device.buttons & (1<<(button.into_u16()-1)) != 0 {
+                            device.buttons &= !(1<<(button.into_u16()-1));
+                            device.send_report(None, None).await;
+                        }
                     }
                     
                 },
-                MouseEvent::Movement(x, y, scroll) => state.send_report(Some((x, y)), Some(scroll)).await,
+                MouseEvent::Movement(target, x, y, scroll) => {
+                    for device in state.get_targets(target) {
+                        device.send_report(Some((x, y)), Some(scroll)).await
+                    }
+                },
             }
         }
     }
