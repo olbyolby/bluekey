@@ -12,8 +12,8 @@ use super::hid::characteristics::callback;
 use bluer::Address;
 use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, ReqError, Service, characteristic_control}}};
 use futures::StreamExt;
-use tokio::sync::{RwLock, mpsc};
-use log::debug;
+use tokio::sync::{RwLock, mpsc, broadcast};
+use log::{debug, info};
 
 
 
@@ -45,16 +45,21 @@ pub enum KeyboardTrySendError {
     ServerDied,
     QueueFull
 }
+#[derive(Clone, Copy, Debug)]
+pub enum KeyboardReturnError {
+    ServerDied,
+    Lagged(u64)
+}
 
 pub struct Keyboard {
     channel: mpsc::Sender<KeyboardEvent>,
-    returns: mpsc::Receiver<KeyboardReturnEvent>,
+    returns: broadcast::Receiver<KeyboardReturnEvent>,
     state: Weak<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>
 }
 impl Keyboard {
     pub fn new(adapter: Arc<Adapter>) -> Keyboard {
         let (keyboard_sender, keyboard_receiver) = mpsc::channel(16);
-        let (return_sender, return_receiver) = mpsc::channel(16);
+        let (return_sender, return_receiver) = broadcast::channel(16);
 
         // Create the keyboard server
         let server_state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
@@ -93,10 +98,11 @@ impl Keyboard {
         }
     }
 
-    pub async fn next_event(&mut self) -> Result<KeyboardReturnEvent, KeyboardServerDied> {
+    pub async fn next_event(&mut self) -> Result<KeyboardReturnEvent, KeyboardReturnError> {
         match self.returns.recv().await {
-            Some(event) => Ok(event),
-            None => Err(KeyboardServerDied)
+            Ok(event) => Ok(event),
+            Err(broadcast::error::RecvError::Closed) => Err(KeyboardReturnError::ServerDied),
+            Err(broadcast::error::RecvError::Lagged(lag)) => Err(KeyboardReturnError::Lagged(lag))
         }
     }
 
@@ -169,7 +175,7 @@ const DEFAULT_STATE: IndividualState = IndividualState {
     report: None
 };
 
-async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: mpsc::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>) {
+async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: broadcast::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>) {
     // Start advertising the keyboard functionality
     let advertisement_handle = adapter.advertise(Advertisement {
        advertisement_type: bluer::adv::Type::Peripheral,
@@ -215,7 +221,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                         0 => Ok(KeyboardReturnEvent::Suspend(request.device_address)),
                         1 => Ok(KeyboardReturnEvent::Wake(request.device_address)),
                         _ => Err(ReqError::Failed)
-                    }?).await.unwrap();
+                    }?).unwrap();
                     Ok(())
                 })),
                 hid::characteristics::report_map(data::REPORT_DESCRIPTOR),
@@ -277,10 +283,10 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                         for (id, led) in (1..=5).map(|i| (i, Led::try_from(i).unwrap())) {
                             if (1<<id) & now_on != 0 {
                                 debug!("{:?} went on", led);
-                                return_sender.send(KeyboardReturnEvent::LedOn(request.device_address, led)).await.unwrap();
+                                return_sender.send(KeyboardReturnEvent::LedOn(request.device_address, led)).unwrap();
                             } else if (1<<id )& now_off != 0 {
                                 debug!("{:?} went off", led);
-                                return_sender.send(KeyboardReturnEvent::LedOff(request.device_address, led)).await.unwrap();
+                                return_sender.send(KeyboardReturnEvent::LedOff(request.device_address, led)).unwrap();
                             }
                         }
                                                 
@@ -313,6 +319,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
         }
     };
 
+    info!("Successfully created keyboard server");
     while let Some(event) = events().await {
         let mut state = state.write().await;
         match event {

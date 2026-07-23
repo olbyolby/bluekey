@@ -5,10 +5,10 @@ use bluer::gatt::CharacteristicWriter;
 use bluer::gatt::local::{Application, CharacteristicControlEvent, ReqError, Service};
 use bluer::{Adapter, adv::Advertisement, gatt::local::characteristic_control};
 use futures::StreamExt;
-use log::debug;
-use tokio::sync::{RwLock, mpsc};
+use log::{debug, info};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
-use crate::bluetooth::{DeviceMap, Register};
+use crate::bluetooth::{DeviceMap, Register, ReturnEventListener};
 
 use super::hid::{self, Protocol};
 use super::hid::characteristics::callback;
@@ -54,6 +54,11 @@ pub enum TryMouseError {
     MouseServerDied,
     QueueFull
 }
+#[derive(Clone, Copy, Debug)]
+pub enum MouseReturnError {
+    ServerDied,
+    Lagged(u64)
+}
 
 #[derive(Clone, Copy, Debug)]
 enum MouseEvent {
@@ -75,7 +80,8 @@ impl From<Register> for MouseReturnEvent {
 
 pub struct Mouse {
     channel: mpsc::Sender<MouseEvent>,
-    returns: mpsc::Receiver<MouseReturnEvent>,
+    returns: broadcast::Receiver<MouseReturnEvent>,
+    returns_sender: broadcast::Sender<MouseReturnEvent>,
     handle: tokio::task::JoinHandle<()>,
     state: Weak<RwLock<MouseServer>>
 }
@@ -83,15 +89,16 @@ pub struct Mouse {
 impl Mouse {
     pub fn new(adapter: Arc<Adapter>) -> Self {
         let (mouse_sender, mouse_receiver) = mpsc::channel(16);
-        let (return_sender, return_receiver) = mpsc::channel(16);
+        let (return_sender, return_receiver) = broadcast::channel(16);
 
         // Create the mouse server
         let state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
-        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender, adapter, state.clone()));
+        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender.clone(), adapter, state.clone()));
 
         Mouse {
             channel: mouse_sender,
             returns: return_receiver,
+            returns_sender: return_sender,
             state: Arc::downgrade(&state),
             handle
         }
@@ -140,17 +147,17 @@ impl Mouse {
         }
     }
 
-    pub async fn next_event(&mut self) -> Result<MouseReturnEvent, MouseServerDied> {
-        match self.returns.recv().await {
-            Some(event) => Ok(event),
-            None => Err(MouseServerDied)
-        }
+    pub fn listen(&self) -> ReturnEventListener<MouseReturnEvent> {
+        ReturnEventListener { receiver: self.returns_sender.subscribe() }
     }
 
     pub fn cancel(&self) {
         self.handle.abort();
     }
 }
+
+
+
 
 type MouseServer = DeviceMap<IndividualMouse, MouseReturnEvent>;
 struct IndividualMouse {
@@ -207,7 +214,7 @@ const DEFAULT_STATE: IndividualMouse = IndividualMouse {
     report: None
 };
 
-async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: mpsc::Sender<MouseReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>) {
+async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: broadcast::Sender<MouseReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>) {
 
     // Start advertising the keyboard functionality
     let advertisement_handle = adapter.advertise(Advertisement {
@@ -252,7 +259,7 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
                         0 => Ok(MouseReturnEvent::Suspend(request.device_address)),
                         1 => Ok(MouseReturnEvent::Wake(request.device_address)),
                         _ => Err(ReqError::Failed)
-                    }?).await.unwrap();
+                    }?).unwrap();
                     Ok(())
                 })),
                 hid::characteristics::report_map(data::REPORT_DESCRIPTOR),
@@ -304,6 +311,7 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
         }
     };
 
+    info!("Successfully created mouse server");
     while let Some(event) = events().await {
         let mut state = state.write().await;
         match event {

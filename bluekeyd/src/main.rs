@@ -1,200 +1,129 @@
 #![allow(dead_code)] // Annoying 'cause I have unfinished APIs
-use std::{str::FromStr, sync::Arc};
+use std::{collections::{HashMap, hash_map::Entry}, path::Path, str::FromStr, sync::Arc};
 
 use bluer::Address;
 // An actually half decent Bluetooth keyboard emulator
-use evdev::{Device, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
+use evdev::Device;
+use log::{debug, info, warn};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use std::{time::{Duration, Instant}, path::PathBuf};
+use zbus::interface;
+use std::path::PathBuf;
 use clap::Parser;
 
-use crate::bluetooth::{Target, keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}, mouse::{Button, Mouse, MouseServerDied}};
+use crate::bluetooth::{Target, keyboard::Keyboard, mouse::Mouse};
 
 mod bluetooth;
+mod evdev_bridge;
 
-#[derive(Debug)]
-enum EvdevBridgeError {
-    #[allow(unused)]
-    EvdevError(std::io::Error),
-    ServerDied
+use evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+struct Id(u64);
+impl zvariant::Type for Id {
+    const SIGNATURE: &'static zvariant::Signature = &zvariant::signature!("(t)");
 }
-impl From<std::io::Error> for EvdevBridgeError {
-    fn from(value: std::io::Error) -> Self {
-        EvdevBridgeError::EvdevError(value)
-    }
-}
-impl From<KeyboardServerDied> for EvdevBridgeError {
-    fn from(_value: KeyboardServerDied) -> Self {
-        EvdevBridgeError::ServerDied
-    }
-}
-impl From<MouseServerDied> for EvdevBridgeError {
-    fn from(_value: MouseServerDied) -> Self {
-        EvdevBridgeError::ServerDied
+impl std::fmt::Display for Id {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "<{}>", self.0)?;
+        Ok(())
     }
 }
 
 
-async fn evdev_keyboard_bridge(mut keyboard: Keyboard, device: Device, target: Target) -> Result<(), EvdevBridgeError> {
-    let mut evdev_stream = device.into_event_stream()?;
-    
-    let mut super_down = false;
-    let mut returns = match target {
-        Target::Target(target) => Some(target),
-        Target::Broadcast => None
-    };
+struct IdSource {
+    id: u64
+}
+impl IdSource {
+    fn new() -> Self {
+        Self { id: 0 }
+    }
+    fn next(&mut self) -> Id {
+        let id = self.id;
+        self.id += 1;
+        Id(id)
+    }
+}
 
-    loop {
-        tokio::select! {
-            event = evdev_stream.next_event() => {
-                if let EventSummary::Key(_, code, action) = event?.destructure() {
-                    if code == evdev::KeyCode::KEY_LEFTMETA {
-                        match action {
-                            0 => super_down = false,
-                            1 => super_down = true,
-                            _ => ()
-                        }
-                    }
-                    if code == evdev::KeyCode::KEY_ESC && action == 1 && super_down {
-                        // Avoid stuck super/windows key
-                        keyboard.release(target, keycode::KeyMap::try_from(keycode::KeyMapping::Evdev(evdev::KeyCode::KEY_LEFTMETA.0)).unwrap().usb as u8).await.unwrap();
-                        return Ok(())
-                    }
-
-                    let map = match keycode::KeyMap::from_key_mapping(keycode::KeyMapping::Evdev(code.0)) {
-                        Ok(map) => map,
-                        Err(_) => continue
-                    };
-                    let code: u8 = map.usb.try_into().expect("USB scancode is always 8 bits");
-                    match action {
-                        0 => keyboard.release(target,code).await?,
-                        1 => keyboard.press(target, code).await?,
-                        _ => ()
-                    };
-                    
-                }
-            },
-            event = keyboard.next_event() => if let Some(target) = returns {
-                match event? {
-                    KeyboardReturnEvent::LedOn(from, led)  if from==target => set_led(evdev_stream.device_mut(), led, true)?,
-                    KeyboardReturnEvent::LedOff(from, led) if from==target => set_led(evdev_stream.device_mut(), led, false)?,
-                    KeyboardReturnEvent::Register(address) if returns == None => returns = Some(address),
-                    _ => ()
-                }                
-            }
+enum Bridge {
+    Keyboard(KeyboardBridge),
+    Mouse(MouseBridge)
+}
+impl Bridge {
+    async fn cancel(self) -> Result<(), EvdevBridgeError> {
+        match self {
+            Self::Keyboard(board) => board.cancel().await,
+            Self::Mouse(mouse) => mouse.cancel().await
         }
     }
 }
-fn set_led(device: &mut Device, led: bluetooth::leds::Led, on: bool) -> Result<(), std::io::Error> {
-    let on = match on {
-        true => 1,
-        false => 0
-    };
 
-    device.send_events(&[
-        InputEvent::new(evdev::EventType::LED.0, led.into_id().into(), on)
-    ])
+struct Bluekey {
+    connection_id: IdSource,
+    bridges: HashMap<Id, Bridge>,
+
+    keyboard_server: Arc<Keyboard>,
+    mouse_server: Arc<Mouse>
 }
 
+#[interface(name = "us.colbystuff.Bluekey1")]
+impl Bluekey {
+    async fn bridge_mouse(&mut self, mouse: &Path, mac: &str) -> Result<Id, zbus::fdo::Error> {
+        let address = Address::from_str(mac).map_err(|_| zbus::fdo::Error::InvalidArgs("Invalid MAC address".into()))?;
 
-fn map_button_codes(button: KeyCode) -> Option<Button> {
-    match button {
-        KeyCode::BTN_LEFT => Some(Button::from_id(1).unwrap()),
-        KeyCode::BTN_RIGHT => Some(Button::from_id(2).unwrap()),
-        KeyCode::BTN_MIDDLE => Some(Button::from_id(3).unwrap()),
-        _ => None
-    }
-}
-struct Clock {
-    duration: Duration,
-    last: Instant
-}
-impl Clock {
-    fn new(duration: Duration) -> Self {
-        Clock {
-            duration,
-            last: Instant::now()
-        }
-    }
-    async fn next(&mut self, instant: Instant) {
-        let remaining = self.duration.saturating_sub(instant.saturating_duration_since(self.last));
+        // Open and grab the device
+        let mut device = evdev::Device::open(mouse).map_err(|e| zbus::fdo::Error::IOError(e.to_string()))?;
+        device.grab().map_err(|e| zbus::fdo::Error::IOError(e.to_string()))?;
+
+        // Start the bridge
+        let bridge = MouseBridge::start(
+            self.mouse_server.clone(), 
+            device.into_event_stream().map_err(|e| zbus::fdo::Error::IOError(e.to_string()))?, 
+            Target::Target(address)
+        );
         
-        if remaining > Duration::new(0, 0) {
-            tokio::time::sleep(remaining).await;
-        }
-        self.last = Instant::now();
+        // Acquire and store ID
+        let id = self.connection_id.next();
+        self.bridges.insert(id, Bridge::Mouse(bridge));
+
+        info!("Started mouse bridge from {} to {} with handle {}", mouse.display(), address, id);
+        Ok(id)
     }
-}
+    async fn destroy_bridge(&mut self, handle: Id) -> Result<(), zbus::fdo::Error> {
+        let entry = match self.bridges.entry(handle) {
+            Entry::Vacant(_) => Err(zbus::fdo::Error::Failed("No such handle".into())),
+            Entry::Occupied(entry) => Ok(entry)
+        }?;
 
-async fn evdev_mouse_bridge(mouse: Mouse, device: Device, target: Target) -> Result<std::convert::Infallible, EvdevBridgeError> {
-    let mut evdev_stream = device.into_event_stream()?;
-    
-    // Immeidately sending all mouse events caused horrific lag and queue backup
-    // The optimal time here depends on the connection interval, which, as far as I know, BlueZ provides no easy way to find
-    // Any faster than the connection interval, and reports start backing up. This *could* be improved using a Bluetooth Classic device,
-    // but that is a *major* rewrite. 
-    let mut movement_clock = Clock::new(Duration::from_millis(30));
-    let mut log_clock = Clock::new(Duration::from_millis(1000));
-    let mut x = 0;
-    let mut y = 0;
-    let mut scroll = 0;
+        if let Err(error) = entry.remove().cancel().await {
+            warn!("Bridge with handle {} failed with error: {:?}", handle, error);
+        };
 
-    #[derive(Debug)]
-    enum Event {
-        Evdev(EventSummary),
-        MouseClock,
-        LogClock
-    }
-    let mut next_event = async || {
-        tokio::select! {
-            event = evdev_stream.next_event() => match event {
-                Ok(event) => Ok(Event::Evdev(event.destructure())),
-                Err(error) => Err(EvdevBridgeError::EvdevError(error))
-            },
-            _ = movement_clock.next(std::time::Instant::now()) => Ok(Event::MouseClock),
-            _ = log_clock.next(std::time::Instant::now()) => Ok(Event::LogClock)
-        }
-    };
+        info!("Destoryed bridge with handle {}", handle);
+        Ok(())
 
-    loop {
-        let event = next_event().await?;
-        match event {
-            Event::Evdev(EventSummary::Key(_, code, action)) if let Some(button) = map_button_codes(code) => match action {
-                0 => mouse.release(target, button).await?,
-                1 => mouse.press(target, button).await?,
-                _ => ()
-            },
-            Event::Evdev(EventSummary::RelativeAxis(_, RelativeAxisCode::REL_X, amount)) => {
-                x += amount;
-            },
-            Event::Evdev(EventSummary::RelativeAxis(_, RelativeAxisCode::REL_Y, amount)) => {
-                y += amount;
-            },
-            Event::Evdev(EventSummary::RelativeAxis(_, RelativeAxisCode::REL_WHEEL, amount)) => {
-                scroll += amount;
-            }
-            Event::MouseClock => {
-                let mx = x.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
-                let my = y.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
-                let ms = scroll.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
-
-                mouse.moved(target, mx, my, ms).await?;
-                x -= mx as i32;
-                y -= my as i32;
-                scroll = 0;
-            },
-            Event::LogClock => {
-                //println!("Avg delta: {}ms, behind: {}ms", delta_sum.as_millis()/(events as u128).max(1), std::time::SystemTime::now().duration_since(latest).unwrap_or(Duration::new(0,0)).as_millis())
-            }
-
-            _ => ()
-        }
     }
 
 }
 
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), zbus::Error> {
+    env_logger::init();
+    debug!("Test log");
+
+    let session = bluer::Session::new().await.unwrap();
+    let adapter = Arc::new(session.default_adapter().await.unwrap());
+
+    let test = Bluekey { connection_id: IdSource::new(), bridges: HashMap::new(), keyboard_server: Arc::new(Keyboard::new(adapter.clone())), mouse_server: Arc::new(Mouse::new(adapter.clone()))};
+    let connection = zbus::connection::Builder::session()?.name("us.colbystuff.Bluekey")?.serve_at("/us/colbystuff/Bluekey",test)?.build().await?;
 
 
+    std::future::pending::<()>().await;
+    drop(connection);
+    Ok(())
+}
+
+/*
 #[derive(Parser)]
 #[command(name = "bluekeyd")]
 /// Pass a keyboard or mouse through an emulated Bluetooth device
@@ -244,7 +173,7 @@ impl Drop for Aborter {
 #[derive(Debug)]
 struct Error(&'static str, Box<dyn std::fmt::Debug>);
 
-#[tokio::main(flavor = "current_thread")]
+
 async fn main() {
     env_logger::init();
     if let Err(Error(message, error)) = command().await {
@@ -312,3 +241,4 @@ async fn command() -> Result<(), Error> {
 
     Ok(())
 }
+*/
