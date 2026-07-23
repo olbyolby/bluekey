@@ -2,7 +2,7 @@ mod data;
 
 use std::sync::{Arc, Weak};
 
-use crate::bluetooth::{DeviceMap, Register};
+use crate::bluetooth::{DeviceMap, Register, ReturnEventListener};
 
 use super::Target;
 
@@ -45,15 +45,11 @@ pub enum KeyboardTrySendError {
     ServerDied,
     QueueFull
 }
-#[derive(Clone, Copy, Debug)]
-pub enum KeyboardReturnError {
-    ServerDied,
-    Lagged(u64)
-}
 
 pub struct Keyboard {
     channel: mpsc::Sender<KeyboardEvent>,
-    returns: broadcast::Receiver<KeyboardReturnEvent>,
+    _returns: broadcast::Receiver<KeyboardReturnEvent>, 
+    returns_sender: broadcast::Sender<KeyboardReturnEvent>,
     state: Weak<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>
 }
 impl Keyboard {
@@ -63,9 +59,9 @@ impl Keyboard {
 
         // Create the keyboard server
         let server_state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
-        tokio::spawn(keyboard_server(keyboard_receiver, return_sender, adapter, server_state.clone()));
+        tokio::spawn(keyboard_server(keyboard_receiver, return_sender.clone(), adapter, server_state.clone()));
 
-        Keyboard { channel: keyboard_sender, returns: return_receiver, state: Arc::downgrade(&server_state) }
+        Keyboard { channel: keyboard_sender, _returns: return_receiver, returns_sender: return_sender, state: Arc::downgrade(&server_state) }
     }
 
 
@@ -98,12 +94,8 @@ impl Keyboard {
         }
     }
 
-    pub async fn next_event(&mut self) -> Result<KeyboardReturnEvent, KeyboardReturnError> {
-        match self.returns.recv().await {
-            Ok(event) => Ok(event),
-            Err(broadcast::error::RecvError::Closed) => Err(KeyboardReturnError::ServerDied),
-            Err(broadcast::error::RecvError::Lagged(lag)) => Err(KeyboardReturnError::Lagged(lag))
-        }
+    pub fn listen(&self) -> ReturnEventListener<KeyboardReturnEvent> {
+        ReturnEventListener { receiver: self.returns_sender.subscribe() }
     }
 
     pub fn devices<'a>(&'a self,) -> Result<DevicesView, KeyboardServerDied> {

@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, hash_map::Entry}, fmt::Debug};
 
 use bluer::Address;
-use tokio::sync::{mpsc, broadcast};
+use tokio::sync::broadcast;
 
 pub mod keyboard;
 pub mod mouse;
@@ -68,7 +68,7 @@ impl<T: Default, E: From<Register> + Debug> DeviceMap<T, E> {
     }
 }
 
-enum ReturnError {
+pub enum ReturnError {
     ServerDied,
     Lagged(u64)
 }

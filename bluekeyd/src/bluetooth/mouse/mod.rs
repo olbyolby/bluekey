@@ -54,11 +54,6 @@ pub enum TryMouseError {
     MouseServerDied,
     QueueFull
 }
-#[derive(Clone, Copy, Debug)]
-pub enum MouseReturnError {
-    ServerDied,
-    Lagged(u64)
-}
 
 #[derive(Clone, Copy, Debug)]
 enum MouseEvent {
@@ -80,7 +75,7 @@ impl From<Register> for MouseReturnEvent {
 
 pub struct Mouse {
     channel: mpsc::Sender<MouseEvent>,
-    returns: broadcast::Receiver<MouseReturnEvent>,
+    _returns: broadcast::Receiver<MouseReturnEvent>,
     returns_sender: broadcast::Sender<MouseReturnEvent>,
     handle: tokio::task::JoinHandle<()>,
     state: Weak<RwLock<MouseServer>>
@@ -97,7 +92,7 @@ impl Mouse {
 
         Mouse {
             channel: mouse_sender,
-            returns: return_receiver,
+            _returns: return_receiver,
             returns_sender: return_sender,
             state: Arc::downgrade(&state),
             handle

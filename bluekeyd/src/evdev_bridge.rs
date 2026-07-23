@@ -2,7 +2,7 @@ use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode, RelativeAxis
 use std::{sync::Arc, time::{Duration, Instant}};
 use tokio::{sync::oneshot, task::JoinHandle};
 
-use crate::bluetooth::{Target, keyboard::{Keyboard, KeyboardReturnError, KeyboardReturnEvent, KeyboardServerDied}, leds::Led, mouse::{Button, Mouse, MouseServerDied}};
+use crate::bluetooth::{ReturnError, Target, keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}, leds::Led, mouse::{Button, Mouse, MouseServerDied}};
 
 
 #[derive(Debug)]
@@ -22,11 +22,11 @@ impl From<KeyboardServerDied> for EvdevBridgeError {
         EvdevBridgeError::ServerDied
     }
 }
-impl From<KeyboardReturnError> for EvdevBridgeError {
-    fn from(value: KeyboardReturnError) -> Self {
+impl From<ReturnError> for EvdevBridgeError {
+    fn from(value: ReturnError) -> Self {
         match value {
-            KeyboardReturnError::Lagged(_) => EvdevBridgeError::Desynced,
-            KeyboardReturnError::ServerDied => EvdevBridgeError::ServerDied
+            ReturnError::Lagged(_) => EvdevBridgeError::Desynced,
+            ReturnError::ServerDied => EvdevBridgeError::ServerDied
         }
     }
 }
@@ -45,7 +45,7 @@ pub struct KeyboardBridge {
     handle: JoinHandle<Result<(), EvdevBridgeError>>
 }
 impl KeyboardBridge {
-    pub fn start(keyboard: Keyboard, device: EventStream, target: Target) -> Self {
+    pub fn start(keyboard: Arc<Keyboard>, device: EventStream, target: Target) -> Self {
         let (canceller, cancelee) = oneshot::channel();
         let handle = tokio::spawn(evdev_keyboard_bridge(keyboard, device, target, cancelee));
         Self {
@@ -59,12 +59,14 @@ impl KeyboardBridge {
     }
 }
 
-async fn evdev_keyboard_bridge(mut keyboard: Keyboard, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> { 
+async fn evdev_keyboard_bridge(keyboard: Arc<Keyboard>, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> { 
     let mut super_down = false;
     let mut returns = match target {
         Target::Target(target) => Some(target),
         Target::Broadcast => None
     };
+
+    let mut keyboard_events = keyboard.listen();
 
     loop {
         tokio::select! {
@@ -96,7 +98,7 @@ async fn evdev_keyboard_bridge(mut keyboard: Keyboard, mut device: EventStream, 
                     
                 }
             },
-            event = keyboard.next_event() => if let Some(target) = returns {
+            event = keyboard_events.next_event() => if let Some(target) = returns {
                 match event? {
                     KeyboardReturnEvent::LedOn(from, led)  if from==target => set_led(device.device_mut(), led, true)?,
                     KeyboardReturnEvent::LedOff(from, led) if from==target => set_led(device.device_mut(), led, false)?,
