@@ -165,6 +165,7 @@ name = "bluekeyd"
 version = "0.1.0"
 dependencies = [
  "bluer",
+ "blueshare",
  "clap",
  "env_logger",
  "evdev",
@@ -204,6 +205,23 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "uuid",
+]
+
+[[package]]
+name = "blueshare"
+version = "0.1.0"
+dependencies = [
+ "bluer",
+ "clap",
+ "env_logger",
+ "evdev",
+ "futures",
+ "keycode",
+ "log",
+ "serde",
+ "tokio",
+ "zbus",
+ "zvariant",
 ]
 
 [[package]]

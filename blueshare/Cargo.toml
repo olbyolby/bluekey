@@ -1,5 +1,5 @@
 [package]
-name = "bluekeyd"
+name = "blueshare"
 version = "0.1.0"
 edition = "2024"
 
@@ -15,4 +15,3 @@ serde = "1.0.229"
 tokio = { version = "1.52.3", features = ["io-std"] }
 zbus = { version = "5.18.0",  default-features = false, features = ["tokio"] }
 zvariant = "5.13.1"
-blueshare = { path = "../blueshare" }

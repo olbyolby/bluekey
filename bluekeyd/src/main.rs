@@ -9,12 +9,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use zbus::{interface, message::Header, names::OwnedUniqueName};
 
-use crate::bluetooth::{Target, keyboard::Keyboard, mouse::Mouse};
+use blueshare::bluetooth::{Target, keyboard::Keyboard, mouse::Mouse};
 
-mod bluetooth;
-mod evdev_bridge;
-
-use evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
+use blueshare::evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 struct Id(u64);
@@ -120,13 +117,17 @@ impl Bluekey {
         Ok(id)
     }
     async fn destroy_bridge(&mut self, #[zbus(header)] header: Header<'_>, handle: Id) -> Result<(), zbus::fdo::Error> {
-        //let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
+        let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
 
         let mut bridges = self.bridges.write().await;
         let entry = match bridges.entry(handle) {
             Entry::Vacant(_) => Err(zbus::fdo::Error::Failed("No such handle".into())),
             Entry::Occupied(entry) => Ok(entry)
         }?;
+
+        if name != entry.get().0 {
+            return Err(zbus::fdo::Error::AccessDenied("Invalid handle".into()))
+        }
 
         if let Err(error) = entry.remove().1.cancel().await {
             warn!("Bridge with handle {} failed with error: {:?}", handle, error);
