@@ -57,7 +57,6 @@ struct Devices {
 }
 
 
-
 #[derive(Debug)]
 struct Error(String, Box<dyn std::fmt::Debug>);
 impl Error {
@@ -70,7 +69,9 @@ impl Error {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::init();
-    if let Err(Error(message, error)) = command().await {
+    let cli = Cli::parse();
+  
+    if let Err(Error(message, error)) = command(cli).await {
         println!("{}", message);
         println!("Error: {:?}", error);
     }
@@ -83,8 +84,8 @@ async fn manage<T, R, F: AsyncFnOnce(&T) -> R, M: AsyncFnOnce(T) -> ()>(value: T
     result
 }
 
-async fn command() -> Result<(), Error> {
-    let cli = Cli::parse();
+async fn command(cli: Cli) -> Result<(), Error> {
+    
 
     // Parse the address
     let address = Address::from_str(&cli.mac).map_err(|e| Error::new("Invalid MAC address", e))?;
@@ -93,7 +94,7 @@ async fn command() -> Result<(), Error> {
     // Get the Bluekey things required
     let connection = zbus::Connection::session().await.map_err(|e| Error::new("Unable to connect to DBus session", e))?;
     let proxy = BluekeyProxy::new(&connection).await.map_err(|e| Error::new("Unable to connect to Bluekey bus(is Bluekeyd running?)", e))?;
-
+    
     let mouse_id = match cli.devices.mouse {
         Some(mouse) => Some(proxy.bridge_mouse(&mouse, &address_str).await.map_err(|e| Error::new("Error creating mouse bridge", e))?),
         None => None
