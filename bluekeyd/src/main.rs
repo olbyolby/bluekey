@@ -109,7 +109,7 @@ impl Bluekey {
             Target::Target(mac)
         );
         
-        // Acquired ID and store bridge
+        // Acquire ID and store bridge
         let id = self.bridge_id_source.next();
         self.bridges.write().await.insert(id, (name.into(), Bridge::Keyboard(bridge)));
 

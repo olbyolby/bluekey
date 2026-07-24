@@ -3,7 +3,7 @@ use std::{path::PathBuf, str::FromStr};
 use bluer::Address;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use zbus::proxy;
-use clap::{command, Parser};
+use clap::Parser;
 
 #[proxy(
     interface="us.colbystuff.Bluekey1",

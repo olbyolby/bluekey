@@ -149,9 +149,27 @@ impl Mouse {
     pub fn cancel(&self) {
         self.handle.abort();
     }
+    pub fn devices<'a>(&'a self,) -> Result<DevicesView, MouseServerDied> {
+        Ok(DevicesView { state: self.state.upgrade().ok_or(MouseServerDied)? })
+
+    }
 }
-
-
+pub struct DevicesView {
+    state: Arc<RwLock<DeviceMap<IndividualMouse, MouseReturnEvent>>>
+}
+impl DevicesView {
+    #[allow(dead_code)]
+    pub async fn collect<T: FromIterator<Address>>(&self) -> T {
+        let lock = self.state.read().await;
+        T::from_iter(lock.devices.keys().cloned())
+    }
+    pub async fn for_each<F: Fn(Address) -> ()>(&self, map: F) {
+        let lock = self.state.read().await;
+        for address in lock.devices.keys().cloned() {
+            map(address);
+        }
+    }
+}
 
 
 type MouseServer = DeviceMap<IndividualMouse, MouseReturnEvent>;
