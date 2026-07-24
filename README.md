@@ -28,6 +28,7 @@ Bluekey works by hosting a standards-compliant GATT HID service, which is the st
 | Shell/GUI Interface | Shell*, DBus*   | Shell                                             | Xorg(GUI)                                                | Shell                                                                              |
 | Platforms           | Linux, Windows* | Linux                                             | Linux                                                    | Linux                                                                              |
 | Multidevice         | Yes             | No                                                | No                                                       | No                                                                                 |
+
 \* indicates unfinished features
 Compared to other software developed for this purpose, Bluekey is intended be simpler to implement, easy to use/configure, and to integrate well with both command line and graphical interfaces. Furthermore, Bluekey supports operating as a background daemon, controllable from both DBus and the CLI, allowing you to disconnect, switch devices, or do other activity without constantly starting and stopping the keyboard and mouse services. Running the Bluetooth service continuously eliminates poor behavior in some devices(like Windows computers) when the HID service starts and stops, while also allowing better ingration with other software.
 
