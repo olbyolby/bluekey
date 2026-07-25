@@ -14,6 +14,7 @@ use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Ap
 use futures::StreamExt;
 use tokio::sync::{RwLock, mpsc, broadcast};
 use log::{debug, info};
+use tokio::task::JoinHandle;
 
 
 
@@ -50,7 +51,8 @@ pub struct Keyboard {
     channel: mpsc::Sender<KeyboardEvent>,
     _returns: broadcast::Receiver<KeyboardReturnEvent>, 
     returns_sender: broadcast::Sender<KeyboardReturnEvent>,
-    state: Weak<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>
+    state: Weak<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>,
+    handle: JoinHandle<()>
 }
 impl Keyboard {
     pub fn new(adapter: Arc<Adapter>) -> Keyboard {
@@ -59,11 +61,12 @@ impl Keyboard {
 
         // Create the keyboard server
         let server_state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
-        tokio::spawn(keyboard_server(keyboard_receiver, return_sender.clone(), adapter, server_state.clone()));
+        let handle = tokio::spawn(keyboard_server(keyboard_receiver, return_sender.clone(), adapter, server_state.clone()));
 
-        Keyboard { channel: keyboard_sender, _returns: return_receiver, returns_sender: return_sender, state: Arc::downgrade(&server_state) }
+        Keyboard { channel: keyboard_sender, _returns: return_receiver, returns_sender: return_sender, state: Arc::downgrade(&server_state), handle }
     }
 
+    
 
     pub async fn press(&self, target: Target, keycode: u8) -> Result<(), KeyboardServerDied> {
         match self.channel.send(KeyboardEvent::PressKey(target, keycode)).await {
@@ -98,11 +101,21 @@ impl Keyboard {
         ReturnEventListener { receiver: self.returns_sender.subscribe() }
     }
 
-    pub fn devices<'a>(&'a self,) -> Result<DevicesView, KeyboardServerDied> {
+    pub fn devices(&self,) -> Result<DevicesView, KeyboardServerDied> {
         Ok(DevicesView { state: self.state.upgrade().ok_or(KeyboardServerDied)? })
 
     }
+
+    pub async fn close(&mut self) {
+        (&mut self.handle).await.unwrap();
+    }
 }
+impl Drop for Keyboard {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 pub struct DevicesView {
     state: Arc<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>
 }

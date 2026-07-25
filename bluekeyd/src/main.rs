@@ -1,4 +1,3 @@
-#![allow(dead_code)] // Annoying 'cause I have unfinished APIs
 // A proof of concept daemon for my Bluetooth keyboard and mosue emulator
 use std::{collections::{HashMap, hash_map::Entry}, ops::Deref, path::Path, str::FromStr, sync::Arc};
 
@@ -6,11 +5,10 @@ use bluer::Address;
 use futures::StreamExt;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
-use zbus::{interface, message::Header, names::OwnedUniqueName};
+use tokio::sync::{Mutex, oneshot};
+use zbus::{Connection, fdo::NameOwnerChangedStream, interface, message::Header, names::OwnedUniqueName};
 
 use blueshare::bluetooth::{Target, keyboard::Keyboard, mouse::Mouse};
-
 use blueshare::evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -24,7 +22,6 @@ impl std::fmt::Display for Id {
         Ok(())
     }
 }
-
 
 struct IdSource {
     id: u64
@@ -54,18 +51,72 @@ impl Bridge {
 }
 
 
-
+struct Cancel;
 struct Bluekey {
     bridge_id_source: IdSource,
-    bridges: Arc<RwLock<HashMap<Id, (OwnedUniqueName, Bridge)>>>,
+    bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>,
 
     keyboard_server: Arc<Keyboard>,
-    mouse_server: Arc<Mouse>
+    mouse_server: Arc<Mouse>,
+    _bridge_cleaner: oneshot::Sender<Cancel>
 }
 
+struct LostBus;
 impl Bluekey {
-    fn dbus_shandler(&self) {
+    async fn bridge_cleaner(mut cancel: oneshot::Receiver<Cancel>, mut source: NameOwnerChangedStream, bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>) -> Result<(), LostBus> {
+        let mut next = async || {
+            tokio::select!{
+                source = source.next() => Some(source.ok_or(LostBus)),
+                _ = &mut cancel => None
+            }.transpose()
+        };
         
+        while let Some(change) = next().await? {
+            let (old_name, new_name) = match change.args() {
+                Ok(args) => (args.old_owner, args.new_owner),
+                Err(_) => continue
+            };
+            let old_name = match old_name.deref() {
+                Some(old_name) => old_name,
+                None => continue
+            };
+
+            if *new_name.deref() == None {
+                let mut bridges = bridges.lock().await;
+
+                bridges.retain(|_, (name, _)| name != old_name)
+            }
+
+        }
+
+        Ok(())
+    }
+
+    async fn start(keyboard: Keyboard, mouse: Mouse) -> Result<Connection, zbus::Error> {
+        let bridges = Arc::new(Mutex::new(HashMap::new()));
+        let (canceller, cancelled) = oneshot::channel();
+        
+        let connection =  {
+            let server = Self {
+                bridge_id_source: IdSource::new(),
+                bridges: bridges.clone(),
+
+                keyboard_server: Arc::new(keyboard),
+                mouse_server: Arc::new(mouse),
+                _bridge_cleaner: canceller
+            };
+            zbus::connection::Builder::session()?
+                .name("us.colbystuff.Bluekey")?
+                .serve_at("/us/colbystuff/Bluekey", server)?
+                .build()
+                .await?
+        };  
+        
+        let dbus = zbus::fdo::DBusProxy::new(&connection).await?;
+        let source = dbus.receive_name_owner_changed().await?;
+        tokio::spawn(Self::bridge_cleaner(cancelled, source, bridges.clone()));
+        
+        Ok(connection)
     }
 }
 
@@ -88,7 +139,7 @@ impl Bluekey {
         
         // Acquired ID and store bridge
         let id = self.bridge_id_source.next();
-        self.bridges.write().await.insert(id, (name.into(), Bridge::Mouse(bridge)));
+        self.bridges.lock().await.insert(id, (name.into(), Bridge::Mouse(bridge)));
         
 
         info!("Started mouse bridge from {} to {} with handle {}", mouse.display(), mac, id);
@@ -111,7 +162,7 @@ impl Bluekey {
         
         // Acquire ID and store bridge
         let id = self.bridge_id_source.next();
-        self.bridges.write().await.insert(id, (name.into(), Bridge::Keyboard(bridge)));
+        self.bridges.lock().await.insert(id, (name.into(), Bridge::Keyboard(bridge)));
 
         info!("Started keyboard bridge from {} to {} with handle {}", keyboard.display(), mac, id);
         Ok(id)
@@ -119,7 +170,7 @@ impl Bluekey {
     async fn destroy_bridge(&mut self, #[zbus(header)] header: Header<'_>, handle: Id) -> Result<(), zbus::fdo::Error> {
         let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
 
-        let mut bridges = self.bridges.write().await;
+        let mut bridges = self.bridges.lock().await;
         let entry = match bridges.entry(handle) {
             Entry::Vacant(_) => Err(zbus::fdo::Error::Failed("No such handle".into())),
             Entry::Occupied(entry) => Ok(entry)
@@ -147,27 +198,12 @@ async fn main() -> Result<(), zbus::Error> {
     let session = bluer::Session::new().await.unwrap();
     let adapter = Arc::new(session.default_adapter().await.unwrap());
 
-    let bridges = Arc::new(RwLock::new(HashMap::new()));
-    let test = Bluekey { bridge_id_source: IdSource::new(), bridges: bridges.clone(), keyboard_server: Arc::new(Keyboard::new(adapter.clone())), mouse_server: Arc::new(Mouse::new(adapter.clone()))};
-    let connection = zbus::connection::Builder::session()?.name("us.colbystuff.Bluekey")?.serve_at("/us/colbystuff/Bluekey",test)?.build().await?;
-
-    let dbus = zbus::fdo::DBusProxy::new(&connection).await.unwrap();
-    let mut owner_change = dbus.receive_name_owner_changed().await.unwrap();
+    let keyboard = Keyboard::new(adapter.clone());
+    let mouse = Mouse::new(adapter);
+    let connection = Bluekey::start(keyboard, mouse).await?;
     
-    while let Some(change) = owner_change.next().await {
-        let args = change.args().unwrap();
-
-        let name = match args.old_owner().deref() {
-            Some(name) => name,
-            None => continue
-        };
-        if args.new_owner == None.into() {
-            let mut bridges = bridges.write().await;
-            bridges.retain(|_, (owner, _)| owner!=name)
-        }
-    }
-    
-
+    std::future::pending::<()>().await;    
     drop(connection);
+    
     Ok(())
 }

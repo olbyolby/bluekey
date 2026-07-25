@@ -1,6 +1,5 @@
 # Bluekey
-
-
+Bluekey is 
 
 (I will finish this probably like, tomorrow(2026-07-20 0141 CST now) or something)
 Presently, a simple command line tool for forwarding either a keyboard or a mouse over Bluetooth to another device from a Linux computer.
@@ -22,4 +21,4 @@ Options:
   -h, --help                 Print help (see more with '--help')
 ```
 
-If you couldn't tell, this is a *very* quick and dirty readme. 
+If you couldn't tell, this is a *very* quick and dirty readme.  

@@ -1,5 +1,5 @@
 use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{borrow::Borrow, time::{Duration, Instant}};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use crate::bluetooth::{ReturnError, Target, keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}, leds::Led, mouse::{Button, Mouse, MouseServerDied}};
@@ -45,7 +45,7 @@ pub struct KeyboardBridge {
     handle: JoinHandle<Result<(), EvdevBridgeError>>
 }
 impl KeyboardBridge {
-    pub fn start(keyboard: Arc<Keyboard>, device: EventStream, target: Target) -> Self {
+    pub fn start<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, device: EventStream, target: Target) -> Self {
         let (canceller, cancelee) = oneshot::channel();
         let handle = tokio::spawn(evdev_keyboard_bridge(keyboard, device, target, cancelee));
         Self {
@@ -57,9 +57,14 @@ impl KeyboardBridge {
         self.canceller.send(Cancel).unwrap_or(()); // If the channel is closed, the bridge has stoped and handle has a value
         self.handle.await.unwrap() // Propgate panics
     }
+    pub async fn wait_for_break(self) -> Result<(), EvdevBridgeError> {
+        self.handle.await.unwrap()
+    }
 }
 
-async fn evdev_keyboard_bridge(keyboard: Arc<Keyboard>, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> { 
+async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> { 
+    let keyboard = keyboard.borrow();
+
     let mut super_down = false;
     let mut returns = match target {
         Target::Target(target) => Some(target),
@@ -156,7 +161,7 @@ pub struct MouseBridge {
     handle: JoinHandle<Result<(), EvdevBridgeError>>
 }
 impl MouseBridge {
-    pub fn start(mouse: Arc<Mouse>, device: EventStream, target: Target) -> Self {
+    pub fn start<T: Borrow<Mouse> + Send + 'static>(mouse: T, device: EventStream, target: Target) -> Self {
         let (canceller, cancelee) = oneshot::channel();
         let handle = tokio::spawn(evdev_mouse_bridge(mouse, device, target, cancelee));
         Self {
@@ -170,7 +175,9 @@ impl MouseBridge {
     }
 }
 
-async fn evdev_mouse_bridge(mouse: Arc<Mouse>, mut device: EventStream, target: Target, mut canceller: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> {  
+async fn evdev_mouse_bridge<T: Borrow<Mouse> + Send + 'static>(mouse: T, mut device: EventStream, target: Target, mut canceller: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> {  
+    let mouse = mouse.borrow();
+
     // Immeidately sending all mouse events caused horrific lag and queue backup
     // The optimal time here depends on the connection interval, which, as far as I know, BlueZ provides no easy way to find
     // Any faster than the connection interval, and reports start backing up. This *could* be improved using a Bluetooth Classic device,

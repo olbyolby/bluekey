@@ -154,6 +154,12 @@ impl Mouse {
 
     }
 }
+impl Drop for Mouse {
+    fn drop(&mut self) {
+        self.handle.abort()
+    }
+}
+
 pub struct DevicesView {
     state: Arc<RwLock<DeviceMap<IndividualMouse, MouseReturnEvent>>>
 }
