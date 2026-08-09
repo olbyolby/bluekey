@@ -1,18 +1,20 @@
 use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use bluer::Address;
-use evdev::Device;
+use evdev::{Device, KeyCode};
+use futures::StreamExt;
 use log::warn;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use zbus::proxy;
 use clap::Parser;
 
-use blueshare::evdev_bridge::{KeyboardBridge, MouseBridge};
+use blueshare::evdev_bridge::{KeyboardBridge, MouseBridge, Shortcut};
 use blueshare::bluetooth::{keyboard::Keyboard, mouse::Mouse, Target};
+use zvariant::OwnedObjectPath;
 
 
 #[proxy(
-    interface="us.colbystuff.Bluekey1",
+    interface="us.colbystuff.Bluekey.Bridge1",
     default_service="us.colbystuff.Bluekey",
     default_path="/us/colbystuff/Bluekey"
 )]
@@ -20,6 +22,9 @@ trait Bluekey {
     async fn bridge_mouse(&self, mouse: &PathBuf, mac: &str) -> Result<u64, zbus::fdo::Error>;
     async fn bridge_keyboard(&self, keyboard: &PathBuf, mac: &str) -> Result<u64, zbus::fdo::Error>;
     async fn destroy_bridge(&self, handle: u64) -> Result<(), zbus::fdo::Error>;
+
+    #[zbus(signal)]
+    fn bridge_broken(&self, id: u64) -> zbus::Result<()>;
 }
 
 
@@ -151,7 +156,7 @@ async fn command(cli: Cli) -> Result<(), Error> {
 
                 println!("Use Super/Windows + esc to break keyboard grab");
                 let keyboard = Keyboard::new(adapter.clone());
-                Ok(KeyboardBridge::start(keyboard, device.into_event_stream().map_err(|e| Error::new("Error generating keyboard stream", e))?, target))
+                Ok(KeyboardBridge::start(keyboard, device.into_event_stream().map_err(|e| Error::new("Error generating keyboard stream", e))?, target, Shortcut::new(Arc::new(Vec::from([KeyCode(1), KeyCode(125)])))))
             }).transpose()?;
 
             let mouse = cli.devices.mouse.map(|mouse| {
@@ -175,6 +180,17 @@ async fn command(cli: Cli) -> Result<(), Error> {
             Ok(())
         },
         Ok((_connection, proxy)) => {
+            let proxy2 = proxy.clone();
+            tokio::task::spawn(async move {
+                let mut stream = proxy2.receive_bridge_broken().await.unwrap();
+                println!("Starting");
+                while let Some(msg) = stream.next().await {
+                    let args = msg.args().unwrap();
+                    println!("{:?}", args.id);
+                }
+                println!("Stream is none?");
+            });
+
             let mut keyboard = BridgeHandle::new();
             let mut mouse = BridgeHandle::new();
             

@@ -2,19 +2,21 @@
 use std::{collections::{HashMap, hash_map::Entry}, ops::Deref, path::Path, str::FromStr, sync::Arc};
 
 use bluer::Address;
+use evdev::KeyCode;
 use futures::StreamExt;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, oneshot};
-use zbus::{Connection, fdo::NameOwnerChangedStream, interface, message::Header, names::OwnedUniqueName};
+use tokio::{sync::{Mutex, oneshot}, task::JoinHandle};
+use zbus::{Connection, fdo::NameOwnerChangedStream, interface, message::Header, names::OwnedUniqueName, object_server::SignalEmitter};
 
-use blueshare::bluetooth::{Target, keyboard::Keyboard, mouse::Mouse};
+use blueshare::{bluetooth::{Target, keyboard::Keyboard, mouse::Mouse}, evdev_bridge::Shortcut};
 use blueshare::evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(transparent)]
 struct Id(u64);
 impl zvariant::Type for Id {
-    const SIGNATURE: &'static zvariant::Signature = &zvariant::signature!("(t)");
+    const SIGNATURE: &'static zvariant::Signature = &zvariant::signature!("t");
 }
 impl std::fmt::Display for Id {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,33 +39,28 @@ impl IdSource {
     }
 }
 
-enum Bridge {
-    Keyboard(KeyboardBridge),
-    Mouse(MouseBridge)
-}
-impl Bridge {
-    async fn cancel(self) -> Result<(), EvdevBridgeError> {
-        match self {
-            Self::Keyboard(board) => board.cancel().await,
-            Self::Mouse(mouse) => mouse.cancel().await
-        }
-    }
-}
+
+
+
 
 
 struct Cancel;
 struct Bluekey {
     bridge_id_source: IdSource,
-    bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>,
+    bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, JoinHandle<()>)>>>,
+    
+    escape_shortcut: Shortcut,
 
     keyboard_server: Arc<Keyboard>,
     mouse_server: Arc<Mouse>,
-    _bridge_cleaner: oneshot::Sender<Cancel>
+    bridge_cleaner: oneshot::Sender<Cancel>
 }
 
 struct LostBus;
 impl Bluekey {
-    async fn bridge_cleaner(mut cancel: oneshot::Receiver<Cancel>, mut source: NameOwnerChangedStream, bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>) -> Result<(), LostBus> {
+    async fn bridge_cleaner(mut cancel: oneshot::Receiver<Cancel>, mut source: NameOwnerChangedStream, bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, JoinHandle<()>)>>>, connection: Arc<Connection>) -> Result<(), LostBus> {
+        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").unwrap();
+        
         let mut next = async || {
             tokio::select!{
                 source = source.next() => Some(source.ok_or(LostBus)),
@@ -83,8 +80,13 @@ impl Bluekey {
 
             if *new_name.deref() == None {
                 let mut bridges = bridges.lock().await;
-
-                bridges.retain(|_, (name, _)| name != old_name)
+                
+                for (handle, (_, bridge)) in bridges.extract_if(|_, (name, _)| name == old_name) {
+                    bridge.abort();
+                    emitter.bridge_broken(handle).await.unwrap();
+                    
+                }
+                
             }
 
         }
@@ -92,37 +94,40 @@ impl Bluekey {
         Ok(())
     }
 
-    async fn start(keyboard: Keyboard, mouse: Mouse) -> Result<Connection, zbus::Error> {
+    async fn start(keyboard: Keyboard, mouse: Mouse) -> Result<Arc<Connection>, zbus::Error> {
         let bridges = Arc::new(Mutex::new(HashMap::new()));
         let (canceller, cancelled) = oneshot::channel();
         
-        let connection =  {
+        let connection =  Arc::new({
             let server = Self {
                 bridge_id_source: IdSource::new(),
                 bridges: bridges.clone(),
 
+                escape_shortcut: Shortcut::new(Arc::new(Vec::from([KeyCode(1), KeyCode(125)]))),
+
                 keyboard_server: Arc::new(keyboard),
                 mouse_server: Arc::new(mouse),
-                _bridge_cleaner: canceller
+                bridge_cleaner: canceller
             };
             zbus::connection::Builder::session()?
                 .name("us.colbystuff.Bluekey")?
                 .serve_at("/us/colbystuff/Bluekey", server)?
                 .build()
                 .await?
-        };  
+        });
         
         let dbus = zbus::fdo::DBusProxy::new(&connection).await?;
         let source = dbus.receive_name_owner_changed().await?;
-        tokio::spawn(Self::bridge_cleaner(cancelled, source, bridges.clone()));
-        
+
+        tokio::spawn(Self::bridge_cleaner(cancelled, source, bridges.clone(), connection.clone()));
+       
         Ok(connection)
     }
 }
 
-#[interface(name = "us.colbystuff.Bluekey1")]
+#[interface(name = "us.colbystuff.Bluekey.Bridge1")]
 impl Bluekey {
-    async fn bridge_mouse(&mut self, #[zbus(header)] header: Header<'_>, mouse: &Path, mac: &str) -> Result<Id, zbus::fdo::Error> {
+    async fn bridge_mouse(&mut self, #[zbus(header)] header: Header<'_>, #[zbus(connection)] connection: &Connection, mouse: &Path, mac: &str) -> Result<Id, zbus::fdo::Error> {
         let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
         let mac = Address::from_str(mac).map_err(|_| zbus::fdo::Error::InvalidArgs("Invalid MAC address".into()))?;
 
@@ -139,13 +144,23 @@ impl Bluekey {
         
         // Acquired ID and store bridge
         let id = self.bridge_id_source.next();
-        self.bridges.lock().await.insert(id, (name.into(), Bridge::Mouse(bridge)));
-        
 
+        let connection = connection.clone();
+        self.bridges.lock().await.insert(id, (name.into(), tokio::task::spawn(async move {
+            let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").unwrap();
+
+            if let Err(error) = bridge.wait_for_break().await {
+                warn!("Bridge with handle {} failed with error: {:?}", id, error);
+            }
+
+            emitter.bridge_broken(id).await.unwrap();
+        })));
+        
+        
         info!("Started mouse bridge from {} to {} with handle {}", mouse.display(), mac, id);
         Ok(id)
     }
-    async fn bridge_keyboard(&mut self, #[zbus(header)] header: Header<'_>, keyboard: &Path, mac: &str) -> Result<Id, zbus::fdo::Error> {
+    async fn bridge_keyboard(&mut self, #[zbus(header)] header: Header<'_>, #[zbus(connection)] connection: &Connection, keyboard: &Path, mac: &str) -> Result<Id, zbus::fdo::Error> {
         let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
         let mac = Address::from_str(mac).map_err(|_| zbus::fdo::Error::InvalidArgs("Invalid MAC address".into()))?;
 
@@ -157,17 +172,30 @@ impl Bluekey {
         let bridge = KeyboardBridge::start(
             self.keyboard_server.clone(), 
             device.into_event_stream().map_err(|e| zbus::fdo::Error::IOError(e.to_string()))?, 
-            Target::Target(mac)
+            Target::Target(mac),
+            self.escape_shortcut.clone()
         );
+        
         
         // Acquire ID and store bridge
         let id = self.bridge_id_source.next();
-        self.bridges.lock().await.insert(id, (name.into(), Bridge::Keyboard(bridge)));
+
+        let connection = connection.clone();
+        self.bridges.lock().await.insert(id, (name.into(), tokio::task::spawn(async move {
+            let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").unwrap();
+
+            if let Err(error) = bridge.wait_for_break().await {
+                warn!("Bridge with handle {} failed with error: {:?}", id, error);
+            }
+            println!("???");
+            emitter.bridge_broken(id).await.unwrap();
+            println!("?fjasdf");
+        })));
 
         info!("Started keyboard bridge from {} to {} with handle {}", keyboard.display(), mac, id);
         Ok(id)
     }
-    async fn destroy_bridge(&mut self, #[zbus(header)] header: Header<'_>, handle: Id) -> Result<(), zbus::fdo::Error> {
+    async fn destroy_bridge(&mut self, #[zbus(header)] header: Header<'_>, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>, handle: Id) -> Result<(), zbus::fdo::Error> {
         let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
 
         let mut bridges = self.bridges.lock().await;
@@ -180,15 +208,20 @@ impl Bluekey {
             return Err(zbus::fdo::Error::AccessDenied("Invalid handle".into()))
         }
 
-        if let Err(error) = entry.remove().1.cancel().await {
-            warn!("Bridge with handle {} failed with error: {:?}", handle, error);
-        };
+        let handle = *entry.key();
+        entry.remove().1.abort();
+        emitter.bridge_broken(handle).await.unwrap();
 
+        
         info!("Destoryed bridge with handle {}", handle);
         Ok(())
     }
 
+    #[zbus(signal)]
+    async fn bridge_broken(emitter: &SignalEmitter<'_>, bridge: Id) -> Result<(), zbus::Error>;
+
 }
+
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), zbus::Error> {

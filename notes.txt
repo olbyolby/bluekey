@@ -1,0 +1,180 @@
+Me  : F0:57:A6:A6:43:E2
+Pi  : B8:27:EB:D5:61:D2
+iPad: 34:F6:8D:35:3E:99 
+lapt: D0:39:57:1D:D3:56
+
+1532:021e 
+003
+
+sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash 
+export $HOME=/home/$USER
+
+
+
+00 Undefined
+01 Num Lock OOC 11.1
+02 Caps Lock OOC 11.1
+03 Scroll Lock OOC 11.1
+04 Compose OOC 11.1
+05 Kana OOC 11.1
+06 Power OOC 11.6
+07 Shift OOC 11.1
+08 Do Not Disturb OOC 11.2
+09 Mute OOC 11.3
+0A Tone Enable OOC 11.3
+0B High Cut Filter OOC 11.3
+0C Low Cut Filter OOC 11.3
+0D Equalizer Enable OOC 11.3
+0E Sound Field On OOC 11.3h
+0F Surround On OOC 11.3
+10 Repeat OOC 11.3
+11 Stereo OOC 11.3
+12 Sampling Rate Detect OOC 11.3
+13 Spinning OOC 11.4
+14 CAV OOC 11.3
+15 CLV OOC 11.3
+16 Recording Format Detect OOC 11.4
+17 Off-Hook OOC 11.2
+18 Ring OOC 11.2
+19 Message Waiting OOC 11.2
+1A Data Mode OOC 11.2
+1B Battery Operation OOC 11.6
+1C Battery OK OOC 11.6
+1D Battery Low OOC 11.6
+1E Speaker OOC 11.2
+1F Headset OOC 11.2
+20 Hold OOC 11.2
+21 Microphone OOC 11.2
+22 Coverage OOC 11.2
+23 Night Mode OOC 11.2
+24 Send Calls OOC 11.2
+25 Call Pickup OOC 11.2
+26 Conference OOC 11.2
+27 Stand-by OOC 11.6
+28 Camera On OOC 11.3
+29 Camera Off OOC 11.3
+2A On-Line OOC 11.6
+2B Off-Line OOC 11.6
+2C Busy OOC 11.6
+2D Ready OOC 11.6
+2E Paper-Out OOC 11.5
+2F Paper-Jam OOC 11.5
+30 Remote OOC 11.6
+31 Forward OOC 11.4
+32 Reverse OOC 11.4
+33 Stop OOC 11.4
+34 Rewind OOC 11.4
+35 Fast Forward OOC 11.4
+36 Play OOC 11.4
+37 Pause OOC 11.4
+38 Record OOC 11.4
+39 Error OOC 11.6
+3A Usage Selected Indicator US 11.6
+3B Usage In Use Indicator US 11.6
+3C Usage Multi Mode Indicator UM 11.6
+3D Indicator On Sel 11.6
+3E Indicator Flash Sel 11.6
+3F Indicator Slow Blink Sel 11.6
+40 Indicator Fast Blink Sel 11.6
+41 Indicator Off Sel 11.6
+42 Flash On Time DV 11.6
+43 Slow Blink On Time DV 11.6
+44 Slow Blink Off Time DV 11.6
+45 Fast Blink On Time DV 11.6
+46 Fast Blink Off Time DV 11.6
+47 Usage Indicator Color UM 11.6
+48 Indicator Red Sel 11.6
+49 Indicator Green Sel 11.6
+4A Indicator Amber Sel 11.6
+4B Generic Indicator OOC 11.6
+4C System Suspend OOC 11.6
+4D External Power Connected OOC 11.6
+4E Indicator Blue [6] Sel 11.6
+4F Indicator Orange [6] Sel 11.6
+50 Good Status [6] OOC 11.6
+51 Warning Status [6] OOC 11.6
+52 RGB LED [6] CL 11.7
+53 Red LED Channel [6] DV 11.7
+54 Blue LED Channel [6] DV 11.7
+55 Green LED Channel [6] DV 11.7
+56 LED Intensity [6] DV 11.7
+57 System Microphone Mute [77] OOC 11.9
+
+60 Player Indicator [29] NAry 11.8
+61 Player 1 [29] Sel 11.8
+62 Player 2 [29] Sel 11.8
+63 Player 3 [29] Sel 11.8
+64 Player 4 [29] Sel 11.8
+65 Player 5 [29] Sel 11.8
+66 Player 6 [29] Sel 11.8
+67 Player 7 [29] Sel 11.8
+68
+
+
+
+"/dev/input/by-id/usb-_RPI_Wired_Keyboard_4-event-kbd"
+
+
+Usage Page (Generic Desktop), 05 01
+Usage (Mouse), 09 02
+Collection (Application), A1 01
+Usage (Pointer), 09 01
+Collection (Physical), A1 00
+Usage Page (Buttons), 05 09
+Usage Minimum (01), 19 01
+Usage Maximun (03), 29 03
+Logical Minimum (0), 15 00
+Logical Maximum (1), 25 01
+Report Count (3), 95 03
+Report Size (1), 75 01
+Input (Data, Variable, Absolute), ;3 button bits 81 02
+Report Count (1), 95 01
+Report Size (5), 75 05
+Input (Constant), ;5 bit padding 81 01
+Usage Page (Generic Desktop), 05 01
+Usage (X), 09 30
+Usage (Y), 09 31
+Logical Minimum (-127), 15 81
+Logical Maximum (127), 25 7F
+Report Size (8), 75 08
+Report Count (2), 95 02
+Input (Data, Variable, Relative), ;2 position bytes (X & Y) 81 06
+End Collection, C0 C0
+End Collection 
+
+0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
+0x09, 0x02,        // Usage (Mouse)
+0xA1, 0x01,        // Collection (Application)
+0x09, 0x01,        //   Usage (Pointer)
+0xA1, 0x00,        //   Collection (Physical)
+0x05, 0x09,        //     Usage Page (Button)
+0x19, 0x01,        //     Usage Minimum (0x01)
+0x29, 0x03,        //     Usage Maximum (0x03)
+0x15, 0x00,        //     Logical Minimum (0)
+0x25, 0x01,        //     Logical Maximum (1)
+0x95, 0x03,        //     Report Count (3)
+0x75, 0x01,        //     Report Size (1)
+0x81, 0x02,        //     Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
+0x95, 0x01,        //     Report Count (1)
+0x75, 0x05,        //     Report Size (5)
+0x81, 0x01,        //     Input (Const,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
+0x05, 0x01,        //     Usage Page (Generic Desktop Ctrls)
+0x09, 0x30,        //     Usage (X)
+0x09, 0x31,        //     Usage (Y)
+0x15, 0x81,        //     Logical Minimum (-127)
+0x25, 0x7F,        //     Logical Maximum (127)
+0x75, 0x08,        //     Report Size (8)
+0x95, 0x02,        //     Report Count (2)
+0x81, 0x06,        //     Input (Data,Var,Rel,No Wrap,Linear,Preferred State,No Null Position)
+0xC0,              //   End Collection
+0xC0,              // End Collection
+
+
+uxplay -n colbysdesktop -vs "videoscale ! video/x-raw,format=YUY2 ! v4l2sink device=/dev/video3"
+sudo modprobe  v4l2loopback devices=2 exclusive_caps=1,0 card_label="OBS Virtual Camera, iPad"
+
+
+connect_keyboard(keyboard: Path, connection: Address) -> Id
+disconnect_keyboard(id: Id) -> ()
+connect_mouse(mouse: Path, connection: Address) -> Id
+disconnect_mouse(id: Id) -> ()

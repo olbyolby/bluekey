@@ -1,5 +1,5 @@
 use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
-use std::{borrow::Borrow, time::{Duration, Instant}};
+use std::{borrow::Borrow, sync::Arc, time::{Duration, Instant}};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use crate::bluetooth::{ReturnError, Target, keyboard::{Keyboard, KeyboardReturnEvent, KeyboardServerDied}, leds::Led, mouse::{Button, Mouse, MouseServerDied}};
@@ -38,34 +38,77 @@ impl From<MouseServerDied> for EvdevBridgeError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Shortcut {
+    shortcut: Arc<Vec<KeyCode>>,
+    progress: usize
+}
+impl Shortcut {
+    pub fn new(shortcut: Arc<Vec<KeyCode>>) -> Self {
+        Self {
+            shortcut,
+            progress: 0
+        }
+    }
+    fn pressed(&mut self, keycode: KeyCode) -> bool {
+        if self.shortcut.contains(&keycode) {
+            self.progress += 1;
+
+            if self.progress == self.shortcut.len() {
+                self.progress = 0;
+                return true
+            } 
+            return false
+        } 
+        return false
+    }
+    fn released(&mut self, keycode: KeyCode) {
+        if self.shortcut.contains(&keycode) {
+            self.progress = 0;
+        }
+    }
+}
+
+
 
 struct Cancel;
 pub struct KeyboardBridge {
-    canceller: oneshot::Sender<Cancel>,
+    canceller: Option<oneshot::Sender<Cancel>>,
     handle: JoinHandle<Result<(), EvdevBridgeError>>
 }
 impl KeyboardBridge {
-    pub fn start<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, device: EventStream, target: Target) -> Self {
+    pub fn start<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, device: EventStream, target: Target, escape: Shortcut) -> Self {
         let (canceller, cancelee) = oneshot::channel();
-        let handle = tokio::spawn(evdev_keyboard_bridge(keyboard, device, target, cancelee));
+        let handle = tokio::spawn(evdev_keyboard_bridge(keyboard, device, target, cancelee, escape));
         Self {
             handle,
-            canceller
+            canceller: Some(canceller)
         }
     }
-    pub async fn cancel(self) -> Result<(), EvdevBridgeError> {
-        self.canceller.send(Cancel).unwrap_or(()); // If the channel is closed, the bridge has stoped and handle has a value
-        self.handle.await.unwrap() // Propgate panics
+    pub async fn cancel(mut self) -> Result<(), EvdevBridgeError> {
+        if let Some(canceller) = self.canceller.take() {
+            let _ = canceller.send(Cancel); // If the channel is closed, the bridge has stoped and handle has a value
+        }
+
+        (&mut self.handle).await.unwrap() // Propgate panics
     }
-    pub async fn wait_for_break(self) -> Result<(), EvdevBridgeError> {
-        self.handle.await.unwrap()
+    pub async fn wait_for_break(mut self) -> Result<(), EvdevBridgeError> {
+        (&mut self.handle).await.unwrap()
+    }
+}
+impl Drop for KeyboardBridge {
+    fn drop(&mut self) {
+        println!("Dropped keyboard bridge");
+        if let Some(canceller) = self.canceller.take() {
+            let _ = canceller.send(Cancel); // If the channel is closed, the bridge has stoped and handle has a value
+        }
     }
 }
 
-async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> { 
+
+async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>, mut escape: Shortcut) -> Result<(), EvdevBridgeError> { 
     let keyboard = keyboard.borrow();
 
-    let mut super_down = false;
     let mut returns = match target {
         Target::Target(target) => Some(target),
         Target::Broadcast => None
@@ -77,17 +120,17 @@ async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T
         tokio::select! {
             event = device.next_event() => {
                 if let EventSummary::Key(_, code, action) = event?.destructure() {
-                    if code == evdev::KeyCode::KEY_LEFTMETA {
-                        match action {
-                            0 => super_down = false,
-                            1 => super_down = true,
-                            _ => ()
-                        }
-                    }
-                    if code == evdev::KeyCode::KEY_ESC && action == 1 && super_down {
-                        // Avoid stuck super/windows key
-                        keyboard.release(target, keycode::KeyMap::try_from(keycode::KeyMapping::Evdev(evdev::KeyCode::KEY_LEFTMETA.0)).unwrap().usb as u8).await.unwrap();
-                        return Ok(())
+                    match action {
+                        0 => escape.released(code),
+                        1 => if escape.pressed(code) {
+                            for key in escape.shortcut.iter() {
+                                if let Ok(code) = keycode::KeyMap::try_from(keycode::KeyMapping::Evdev(key.0)) {
+                                    keyboard.release(target, code.usb as u8).await?
+                                }
+                            }
+                            break Ok(())
+                        },
+                        _ => ()
                     }
 
                     let map = match keycode::KeyMap::from_key_mapping(keycode::KeyMapping::Evdev(code.0)) {
@@ -157,7 +200,7 @@ fn map_button_codes(button: KeyCode) -> Option<Button> {
 }
 
 pub struct MouseBridge {
-    canceller: oneshot::Sender<Cancel>,
+    canceller: Option<oneshot::Sender<Cancel>>,
     handle: JoinHandle<Result<(), EvdevBridgeError>>
 }
 impl MouseBridge {
@@ -166,14 +209,27 @@ impl MouseBridge {
         let handle = tokio::spawn(evdev_mouse_bridge(mouse, device, target, cancelee));
         Self {
             handle,
-            canceller
+            canceller: Some(canceller)
         }
     }
-    pub async fn cancel(self) -> Result<(), EvdevBridgeError> {
-        self.canceller.send(Cancel).unwrap_or(()); // If the channel is closed, the bridge has stoped and handle has a value
-        self.handle.await.unwrap() // Propgate panics
+    pub async fn cancel(mut self) -> Result<(), EvdevBridgeError> {
+        if let Some(canceller) = self.canceller.take() {
+            let _ = canceller.send(Cancel); // If the channel is closed, the bridge has stoped and handle has a value
+        }
+        (&mut self.handle).await.unwrap() // Propgate panics
+    }
+    pub async fn wait_for_break(mut self) -> Result<(), EvdevBridgeError> {
+        (&mut self.handle).await.unwrap()
     }
 }
+impl Drop for MouseBridge {
+    fn drop(&mut self) {
+        if let Some(canceller) = self.canceller.take() {
+            let _ = canceller.send(Cancel); // If the channel is closed, the bridge has stoped and handle has a value
+        }
+    }
+}
+
 
 async fn evdev_mouse_bridge<T: Borrow<Mouse> + Send + 'static>(mouse: T, mut device: EventStream, target: Target, mut canceller: oneshot::Receiver<Cancel>) -> Result<(), EvdevBridgeError> {  
     let mouse = mouse.borrow();
