@@ -10,8 +10,6 @@ use clap::Parser;
 
 use blueshare::evdev_bridge::{KeyboardBridge, MouseBridge, Shortcut};
 use blueshare::bluetooth::{keyboard::Keyboard, mouse::Mouse, Target};
-use zvariant::OwnedObjectPath;
-
 
 #[proxy(
     interface="us.colbystuff.Bluekey.Bridge1",
