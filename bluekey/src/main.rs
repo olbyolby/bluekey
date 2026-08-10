@@ -8,13 +8,15 @@ use log::warn;
 use zbus::proxy;
 use clap::Parser;
 
+mod ev_key_map;
+mod wait_enter;
 
 #[proxy(
     interface="us.colbystuff.Bluekey.Bridge1",
     default_service="us.colbystuff.Bluekey",
     default_path="/us/colbystuff/Bluekey"
 )]
-trait Bluekey {
+trait BluekeyBridge {
     async fn bridge_mouse(&self, mouse: &Path, mac: &str) -> Result<u64, zbus::fdo::Error>;
     async fn bridge_keyboard(&self, keyboard: &Path, mac: &str) -> Result<u64, zbus::fdo::Error>;
     async fn destroy_bridge(&self, handle: u64) -> Result<(), zbus::fdo::Error>;
@@ -22,15 +24,25 @@ trait Bluekey {
     #[zbus(signal)]
     fn bridge_broken(&self, id: u64) -> zbus::Result<()>;
 }
+#[proxy(
+    interface="us.colbystuff.Bluekey.Configuration1",
+    default_service="us.colbystuff.Bluekey",
+    default_path="/us/colbystuff/Bluekey"
+)]
+trait BluekeyConfig {
+    #[zbus(property)]
+    fn get_keyboard_escape_shortcut(&self) -> Result<Shortcut, zbus::fdo::Error>;
+
+}
 
 
 
 struct HandleWrapper<'a> {
-    proxy: BluekeyProxy<'a>,
+    proxy: BluekeyBridgeProxy<'a>,
     handles: Vec<u64>
 }
 impl<'a> HandleWrapper<'a> {
-    async fn wrap<F: AsyncFnOnce(&mut HandleWrapper) -> T, T>(proxy: BluekeyProxy<'a>, handler: F) -> T {
+    async fn wrap<F: AsyncFnOnce(&mut HandleWrapper) -> T, T>(proxy: BluekeyBridgeProxy<'a>, handler: F) -> T {
         let mut wrapper = Self {
             proxy,
             handles: Vec::new()
@@ -56,6 +68,35 @@ impl<'a> HandleWrapper<'a> {
         let handle = self.proxy.bridge_keyboard(keyboard, mac).await?;
         self.handles.push(handle);
         Ok(handle)
+    }
+}
+
+struct Shortcut {
+    keys: Vec<u16>
+}
+impl TryFrom<zvariant::OwnedValue> for Shortcut {
+    type Error = zvariant::Error;
+    fn try_from(value: zvariant::OwnedValue) -> Result<Self, Self::Error> {
+        Ok(Self { keys: Vec::<u16>::try_from(value)?})
+    }
+}
+impl Display for Shortcut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut keys = self.keys.iter();
+        if let Some(key) = keys.next() {
+            match ev_key_map::evdev_keycode_to_name(*key) {
+                Some(name) => write!(f, "{}", name),
+                None => write!(f, "<keycode: {}>", key)
+            }?
+        }
+
+        for key in keys {
+            match ev_key_map::evdev_keycode_to_name(*key) {
+                Some(name) => write!(f, "+{}", name),
+                None => write!(f, "+<keycode: {}>", key)
+            }?
+        };
+        Ok(())
     }
 }
 
@@ -148,19 +189,19 @@ async fn main() {
     if let Err(error) = command(&cli).await {
         println!("{}", error);
     }
-
 }
 
 
 async fn command<'a>(cli: &'a Cli) -> Result<(), Error<'a>> { 
     // Parse the device's MAC address
-    let (target, address) = Address::from_str(&cli.mac).map(|address| (address, &cli.mac)).map_err(|e| Error::AddressFormatting(&cli.mac, e))?;
+    let (_target, address) = Address::from_str(&cli.mac).map(|address| (address, &cli.mac)).map_err(|e| Error::AddressFormatting(&cli.mac, e))?;
 
     // Establish DBus connection
     let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection(ConnectionStage::DBusConnection, e))?;
-    let proxy = BluekeyProxy::new(&connection).await.map_err(|e| Error::DbusConnection(ConnectionStage::BluekeyProxy, e))?;
+    let bridges = BluekeyBridgeProxy::new(&connection).await.map_err(|e| Error::DbusConnection(ConnectionStage::BluekeyProxy, e))?;
+    let config = BluekeyConfigProxy::new(&connection).await.map_err(|e| Error::DbusConnection(ConnectionStage::BluekeyProxy, e))?;
 
-    HandleWrapper::wrap(proxy, async |proxy| {
+    HandleWrapper::wrap(bridges, async |proxy| {
         let mut breakage = proxy.proxy.receive_bridge_broken().await.map_err(|e| Error::DbusConnection(ConnectionStage::SignalListener, e))?;
 
         let mouse = match &cli.devices.mouse {
@@ -169,11 +210,24 @@ async fn command<'a>(cli: &'a Cli) -> Result<(), Error<'a>> {
         }.transpose()?;
 
         let keyboard = match &cli.devices.keyboard {
-            Some(keyboard) => Some(proxy.bridge_keyboard(&keyboard, &address).await.map_err(|e| Error::Keyboard(e))),
+            Some(keyboard) => {
+                println!("Press {} to break keyboard grab.", config.get_keyboard_escape_shortcut().await.map_err(|e| Error::Keyboard(e))?);
+                Some(proxy.bridge_keyboard(&keyboard, &address).await.map_err(|e| Error::Keyboard(e)))
+            },
             None => None
         }.transpose()?;
         
-        while let Some(signal) = breakage.next().await {
+        let mut stdin = std::io::stdin().lock();
+  
+        let mut next = async move || {
+            tokio::select! {
+                signal = breakage.next() => signal,
+                _ = wait_enter::async_wait_enter(&mut stdin) => None
+            }
+        };
+
+        println!("Press enter to exit.");
+        while let Some(signal) = next().await {
             let args = match signal.args() {
                 Ok(arg) => arg,
                 Err(_) => {
@@ -188,9 +242,13 @@ async fn command<'a>(cli: &'a Cli) -> Result<(), Error<'a>> {
 
         }
         
-
         Ok::<(), Error>(())        
     }).await?;
 
+    println!("Exiting...");
+
     Ok(())
 }
+
+
+

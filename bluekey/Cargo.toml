@@ -16,3 +16,4 @@ tokio = { version = "1.52.3", features = ["io-std"] }
 zbus = { version = "5.18.0",  default-features = false, features = ["tokio"] }
 zvariant = "5.13.1"
 blueshare = { path = "../blueshare" }
+libc = "0.2.189"

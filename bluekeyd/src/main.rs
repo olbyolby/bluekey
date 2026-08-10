@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 use zbus::{Connection, fdo::NameOwnerChangedStream, interface, message::Header, names::OwnedUniqueName, object_server::SignalEmitter};
 
-use blueshare::{bluetooth::{Target, keyboard::Keyboard, mouse::Mouse}, evdev_bridge::Shortcut};
+use blueshare::{bluetooth::{Target, keyboard::Keyboard, mouse::Mouse}, evdev_bridge::{SharedShortcut, Shortcut}};
 use blueshare::evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -59,7 +59,7 @@ struct Bluekey {
     bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>,
     bridge_broken_sender: mpsc::Sender<Id>,
     
-    escape_shortcut: Shortcut,
+    escape_shortcut: SharedShortcut,
 
     keyboard_server: Arc<Keyboard>,
     mouse_server: Arc<Mouse>
@@ -125,21 +125,26 @@ impl Bluekey {
         let (sender, reciever) = mpsc::channel(16);
         
         let connection = {
-            let server = Self {
+            let escape_shortcut = SharedShortcut::new(Arc::new(Vec::from([KeyCode(125), KeyCode(1)])));
+            let bridges = Self {
                 bridge_id_source: IdSource::new(),
                 bridges: bridges.clone(),
                 bridge_broken_sender: sender,
 
-                escape_shortcut: Shortcut::new(Arc::new(Vec::from([KeyCode(1), KeyCode(125)]))),
+                escape_shortcut: escape_shortcut.clone(),
 
                 keyboard_server: Arc::new(keyboard),
                 mouse_server: Arc::new(mouse),
-                
+            };
+
+            let config = Config {
+                keyboard_escape_shortcut: escape_shortcut
             };
 
             zbus::connection::Builder::session()?
                 .name("us.colbystuff.Bluekey")?
-                .serve_at("/us/colbystuff/Bluekey", server)?
+                .serve_at("/us/colbystuff/Bluekey", bridges)?
+                .serve_at("/us/colbystuff/Bluekey", config)?
                 .build()
                 .await?
         };
@@ -195,7 +200,7 @@ impl Bluekey {
             self.keyboard_server.clone(), 
             device.into_event_stream().map_err(|e| zbus::fdo::Error::IOError(e.to_string()))?, 
             Target::Target(mac),
-            self.escape_shortcut.clone(),
+            Shortcut::new(&self.escape_shortcut),
             async move || {target.send(id).await.unwrap()}
         );        
         
@@ -231,6 +236,17 @@ impl Bluekey {
     #[zbus(signal)]
     async fn bridge_broken(emitter: &SignalEmitter<'_>, bridge: Id) -> Result<(), zbus::Error>;
 
+}
+
+struct Config {
+    keyboard_escape_shortcut: SharedShortcut
+}
+#[interface(name = "us.colbystuff.Bluekey.Configuration1")]
+impl Config {
+    #[zbus(property)]
+    fn get_keyboard_escape_shortcut(&self) -> Vec<u16> {
+        self.keyboard_escape_shortcut.keys().iter().map(|code| code.0).collect()
+    }
 }
 
 

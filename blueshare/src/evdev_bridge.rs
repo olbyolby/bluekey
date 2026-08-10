@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
 use std::{borrow::Borrow, sync::Arc, time::{Duration, Instant}};
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -38,23 +39,50 @@ impl From<MouseServerDied> for EvdevBridgeError {
     }
 }
 
+#[derive(Clone)]
+pub struct SharedShortcut {
+    shortcut: Arc<ArcSwap<Vec<KeyCode>>>
+}
+impl SharedShortcut {
+    pub fn new(shortcut: Arc<Vec<KeyCode>>) -> Self {
+        Self {
+            shortcut: Arc::new(ArcSwap::new(shortcut))
+        }
+    }
+
+    pub fn update(&self, shortcut: Arc<Vec<KeyCode>>) {
+        self.shortcut.swap(shortcut);
+    }
+
+    pub fn shortcut(&self) -> Shortcut {
+        Shortcut::new(self)
+    }
+
+    pub fn keys(&self) -> Arc<Vec<KeyCode>> {
+        self.shortcut.load().clone()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Shortcut {
-    shortcut: Arc<Vec<KeyCode>>,
+    shortcut: Arc<ArcSwap<Vec<KeyCode>>>, // This is cursed
+    active: Arc<Vec<KeyCode>>,
     progress: usize
 }
 impl Shortcut {
-    pub fn new(shortcut: Arc<Vec<KeyCode>>) -> Self {
+    pub fn new(shared: &SharedShortcut) -> Self {
         Self {
-            shortcut,
+            shortcut: shared.shortcut.clone(),
+            active: shared.shortcut.load().clone(),
             progress: 0
         }
     }
+
     fn pressed(&mut self, keycode: KeyCode) -> bool {
-        if self.shortcut.contains(&keycode) {
+        if self.active[self.progress] == keycode {
             self.progress += 1;
 
-            if self.progress == self.shortcut.len() {
+            if self.progress == self.active.len() {
                 self.progress = 0;
                 return true
             } 
@@ -63,9 +91,17 @@ impl Shortcut {
         return false
     }
     fn released(&mut self, keycode: KeyCode) {
-        if self.shortcut.contains(&keycode) {
+        if self.active[..=self.progress].contains(&keycode) {
             self.progress = 0;
         }
+
+        if self.progress == 0 {
+            self.active = self.shortcut.load().clone();
+        }
+    }
+
+    pub fn keys(&self) -> &[KeyCode] {
+        &self.active
     }
 }
 
@@ -136,7 +172,7 @@ async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T
                     match action {
                         0 => escape.released(code),
                         1 => if escape.pressed(code) {
-                            for key in escape.shortcut.iter() {
+                            for key in escape.keys().iter() {
                                 if let Ok(code) = keycode::KeyMap::try_from(keycode::KeyMapping::Evdev(key.0)) {
                                     keyboard.release(target, code.usb as u8).await?
                                 }
