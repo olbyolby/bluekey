@@ -80,7 +80,7 @@ pub struct Mouse {
     handle: tokio::task::JoinHandle<()>,
     state: Weak<RwLock<MouseServer>>
 }
-#[allow(dead_code)]
+
 impl Mouse {
     pub fn new(adapter: Arc<Adapter>) -> Self {
         let (mouse_sender, mouse_receiver) = mpsc::channel(16);
@@ -164,7 +164,6 @@ pub struct DevicesView {
     state: Arc<RwLock<DeviceMap<IndividualMouse, MouseReturnEvent>>>
 }
 impl DevicesView {
-    #[allow(dead_code)]
     pub async fn collect<T: FromIterator<Address>>(&self) -> T {
         let lock = self.state.read().await;
         T::from_iter(lock.devices.keys().cloned())

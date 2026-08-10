@@ -154,7 +154,7 @@ async fn command(cli: Cli) -> Result<(), Error> {
 
                 println!("Use Super/Windows + esc to break keyboard grab");
                 let keyboard = Keyboard::new(adapter.clone());
-                Ok(KeyboardBridge::start(keyboard, device.into_event_stream().map_err(|e| Error::new("Error generating keyboard stream", e))?, target, Shortcut::new(Arc::new(Vec::from([KeyCode(1), KeyCode(125)])))))
+                Ok(KeyboardBridge::start(keyboard, device.into_event_stream().map_err(|e| Error::new("Error generating keyboard stream", e))?, target, Shortcut::new(Arc::new(Vec::from([KeyCode(1), KeyCode(125)]))), async || ()))
             }).transpose()?;
 
             let mouse = cli.devices.mouse.map(|mouse| {
@@ -167,7 +167,7 @@ async fn command(cli: Cli) -> Result<(), Error> {
 
 
             match keyboard {
-                Some(board) => board.wait_for_break().await.map_err(|e| Error::new("Error in keyboard bridge", e)),
+                Some(board) => board.wait_for_break().await.map_err(|e| Error::new("Error in keyboard bridge", e)).map(|_| ()),
                 None => {
                     println!("Press enter to exit.");
                     lines.next_line().await.map_err(|e: std::io::Error| Error::new("Stdin input error.",e)).map(|_| ())
@@ -201,7 +201,7 @@ async fn command(cli: Cli) -> Result<(), Error> {
                     mouse.wrap(proxy.bridge_mouse(&rat, &address).await.map_err(|e| Error::new("Error creating mouse bridge", e))?)
                 }
 
-                lines.next_line().await.map_err(|e: std::io::Error| Error::new("Stdin input error.",e))?;
+                
                 Ok(())
             })(keyboard.wrap(), mouse.wrap()).await;
             keyboard.destroy(&proxy).await;

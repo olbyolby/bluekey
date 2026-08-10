@@ -72,33 +72,46 @@ impl Shortcut {
 
 
 struct Cancel;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BreakReason {
+    Cancelled,
+    Escaped
+}
+
+
 pub struct KeyboardBridge {
     canceller: Option<oneshot::Sender<Cancel>>,
-    handle: JoinHandle<Result<(), EvdevBridgeError>>
+    handle: JoinHandle<Result<BreakReason, EvdevBridgeError>>
 }
 impl KeyboardBridge {
-    pub fn start<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, device: EventStream, target: Target, escape: Shortcut) -> Self {
+    pub fn start<T: Borrow<Keyboard> + Send + 'static, F: FnOnce() -> R + Send + 'static, R: Future<Output=()> + Send>(keyboard: T, device: EventStream, target: Target, escape: Shortcut, notify: F) -> Self {
         let (canceller, cancelee) = oneshot::channel();
-        let handle = tokio::spawn(evdev_keyboard_bridge(keyboard, device, target, cancelee, escape));
+        let handle = tokio::spawn(async move {
+            let result = evdev_keyboard_bridge(keyboard, device, target, cancelee, escape).await;
+            if !matches!(result, Ok(BreakReason::Cancelled)) {
+                notify().await;
+            }
+            result
+        });        
+        
         Self {
             handle,
             canceller: Some(canceller)
         }
     }
-    pub async fn cancel(mut self) -> Result<(), EvdevBridgeError> {
+    pub async fn cancel(mut self) -> Result<BreakReason, EvdevBridgeError> {
         if let Some(canceller) = self.canceller.take() {
             let _ = canceller.send(Cancel); // If the channel is closed, the bridge has stoped and handle has a value
         }
 
         (&mut self.handle).await.unwrap() // Propgate panics
     }
-    pub async fn wait_for_break(mut self) -> Result<(), EvdevBridgeError> {
+    pub async fn wait_for_break(mut self) -> Result<BreakReason, EvdevBridgeError> {
         (&mut self.handle).await.unwrap()
     }
 }
 impl Drop for KeyboardBridge {
     fn drop(&mut self) {
-        println!("Dropped keyboard bridge");
         if let Some(canceller) = self.canceller.take() {
             let _ = canceller.send(Cancel); // If the channel is closed, the bridge has stoped and handle has a value
         }
@@ -106,7 +119,7 @@ impl Drop for KeyboardBridge {
 }
 
 
-async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>, mut escape: Shortcut) -> Result<(), EvdevBridgeError> { 
+async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T, mut device: EventStream, target: Target, mut cancel: oneshot::Receiver<Cancel>, mut escape: Shortcut) -> Result<BreakReason, EvdevBridgeError> { 
     let keyboard = keyboard.borrow();
 
     let mut returns = match target {
@@ -128,7 +141,7 @@ async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T
                                     keyboard.release(target, code.usb as u8).await?
                                 }
                             }
-                            break Ok(())
+                            break Ok(BreakReason::Escaped)
                         },
                         _ => ()
                     }
@@ -154,7 +167,7 @@ async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T
                     _ => ()
                 }                
             },
-            _ = &mut cancel => return Ok(())
+            _ = &mut cancel => return Ok(BreakReason::Cancelled)
         }
     }
 }
