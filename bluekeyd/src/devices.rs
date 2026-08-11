@@ -1,78 +1,75 @@
-use std::{collections::{HashMap, hash_map::Entry}, ops::Deref, sync::{Arc, atomic::AtomicBool}, fmt::Write};
+use std::{collections::{HashMap, hash_map::Entry}, fmt::Write, sync::Arc};
 
 use bluer::{Adapter, AdapterEvent, Address};
 use blueshare::bluetooth::{ReturnError, keyboard::{Keyboard, KeyboardReturnEvent}, mouse::{Mouse, MouseReturnEvent}};
 use futures::StreamExt;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use zbus::{Connection, interface};
+use zbus::{Connection, interface, object_server::{InterfaceRef, SignalEmitter}};
 
 
 #[derive(Deserialize, Serialize, zvariant::Type, zvariant::Value, PartialEq, Eq, Debug, Clone, Copy)]
 #[repr(u8)]
 enum PowerStatus {
-    Suspended,
-    Active,
+    Suspended = 1,
+    Active = 0,
 }
-
-
-
-
 
 struct Device {
     address: String,
-    suspended: AtomicBool,
-    has_keyboard: AtomicBool,
-    has_mouse: AtomicBool
+    power: PowerStatus,
+    has_keyboard: bool,
+    has_mouse: bool
 }
 impl Device {
     fn new(address: String) -> Self {
         Self {
             address,
-            suspended: AtomicBool::new(false),
-            has_keyboard: AtomicBool::new(false),
-            has_mouse: AtomicBool::new(false)
+            power: PowerStatus::Active,
+            has_keyboard: false,
+            has_mouse: false
         }
     }
-}
-#[derive(Clone)]
-struct DeviceInterface(Arc<Device>);
-impl Deref for DeviceInterface {
-    type Target = Device;
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    async fn set_keyboard(&mut self, value: bool, emitter: &SignalEmitter<'_>) -> Result<(), zbus::Error> {
+        self.has_keyboard = value;
+        self.has_keyboard_changed(emitter).await
+    }
+    async fn set_mouse(&mut self, value: bool, emitter: &SignalEmitter<'_>) -> Result<(), zbus::Error> {
+        self.has_mouse = value;
+        self.has_mouse_changed(emitter).await
+    }
+    async fn set_power(&mut self, value: PowerStatus, emitter: &SignalEmitter<'_>) -> Result<(), zbus::Error> {
+        self.power = value;
+        self.power_changed(emitter).await
     }
 }
 
 #[interface(name = "us.colbystuff.Bluekey.Device1")]
-impl DeviceInterface {
+impl Device {
     #[zbus(property(emits_changed_signal = "const"))]
     fn address(&self) -> &str {
         &self.address
     }
 
     #[zbus(property)]
-    fn status(&self) -> PowerStatus {
-        match self.suspended.load(std::sync::atomic::Ordering::Acquire) {
-            true => PowerStatus::Suspended,
-            false => PowerStatus::Active
-        }
+    fn power(&self) -> PowerStatus {
+        self.power
     }
 
     #[zbus(property)]
     fn has_keyboard(&self) -> bool {
-        self.has_keyboard.load(std::sync::atomic::Ordering::Acquire)
+        self.has_keyboard
     }
 
     #[zbus(property)]
     fn has_mouse(&self) -> bool {
-        self.has_mouse.load(std::sync::atomic::Ordering::Acquire)
+        self.has_mouse
     }
 }
 
 struct DeviceMap {
-    devices: HashMap<Address, Arc<Device>>,
+    devices: HashMap<Address, String>,
     connection: Connection
 }
 impl DeviceMap {
@@ -80,17 +77,22 @@ impl DeviceMap {
         Self { devices: HashMap::new(), connection }
     }
 
-    async fn acquire(&mut self, address: Address) -> Result<Arc<Device>, zbus::Error> {
-        match self.devices.entry(address) {
-            Entry::Occupied(entry) => Ok(entry.get().clone()),
+    async fn acquire(&mut self, address: Address) -> Result<(InterfaceRef<Device>, &str), zbus::Error>{
+        let path = &**match self.devices.entry(address) {
+            Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let device = Arc::new(Device::new(address.to_string()));
+                let device = Device::new(address.to_string());
+                let path = Self::address_path(address);
 
-                info!("Created device {}", Self::address_path(address));
-                self.connection.object_server().at(Self::address_path(address), DeviceInterface(device.clone())).await?;
-                Ok(entry.insert(device.clone()).clone())
+                info!("Created device {}", path);
+                self.connection.object_server().at(&*path, device).await?;
+                entry.insert(path)
             } 
-        }
+        };
+
+        self.connection.object_server().interface(path).await
+            .map(|interface| (interface, path))
+
     }
 
     fn address_path(address: Address) -> String {
@@ -103,9 +105,11 @@ impl DeviceMap {
     }
 
     async fn remove(&mut self, address: Address) {
-        if let Some(_) = self.devices.remove(&address) {
-            info!("Removed device {}", Self::address_path(address));
-            self.connection.object_server().remove::<DeviceInterface, _>(Self::address_path(address)).await.unwrap();
+        if let Some(path) = self.devices.remove(&address) {
+            info!("Removed device {}", path);
+            if let Err(error) = self.connection.object_server().remove::<Device, _>(&*path).await {
+                warn!("Error removing device {}: {}", path, error)
+            }
         }
     }
 
@@ -117,25 +121,30 @@ pub async fn devices_tracker(connection: Connection, adapter: Arc<Adapter>, keyb
     let mut mouse = mouse.listen();
     let mut adapter_events = adapter.events().await.unwrap();
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum DeviceType {
-        Keyboard,
-        Mouse
+    connection.object_server().at("/us/colbystuff/Bluekey/devices", zbus::fdo::ObjectManager).await.unwrap();
+    
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Notification {
+        KeyboardAvailable,
+        MouseAvailable,
+        Wake,
+        Suspend
     }
 
-    // This is a mess of what can only be described as "ownership spegehtti", due to the fact zbus really wants an interface to be responsible for itself and it's own updates, but, in this case, it simply... isn't.
-    // I'm half convinced it'd be better to just handle all these messages by hand or something. 
     let mut devices = DeviceMap::new(connection.clone());
 
     loop {
-        let (address, device_type) = tokio::select! {
+        let (address, notification) = tokio::select! {
             event = keyboard.next_event() => match event? {
-                KeyboardReturnEvent::Register(event) => (event, DeviceType::Keyboard),
+                KeyboardReturnEvent::Register(address) => (address, Notification::KeyboardAvailable),
+                KeyboardReturnEvent::Suspend(address) => (address, Notification::Suspend),
+                KeyboardReturnEvent::Wake(address) => (address, Notification::Wake),
                 _ => continue
             },
             event = mouse.next_event() => match event? {
-                MouseReturnEvent::Register(event) => (event, DeviceType::Mouse),
-                _ => continue
+                MouseReturnEvent::Register(address) => (address, Notification::MouseAvailable),
+                MouseReturnEvent::Suspend(address) => (address, Notification::Suspend),
+                MouseReturnEvent::Wake(address) => (address, Notification::Wake),
             },
             event = adapter_events.next() => match event {
                 Some(AdapterEvent::DeviceRemoved(address)) => {
@@ -146,26 +155,23 @@ pub async fn devices_tracker(connection: Connection, adapter: Arc<Adapter>, keyb
             }
         };
 
-        let device = match devices.acquire(address).await {
-            Ok(device) => device,
+        let (interface, path) = match devices.acquire(address).await {
+            Ok(interface) => interface,
             Err(error) => {
                 warn!("Error creating device object for {}: {}", address, error);
                 continue;
             }
         };
         
-        use std::sync::atomic::Ordering;
-        let interface = connection.object_server().interface::<_, DeviceInterface>(DeviceMap::address_path(address)).await.unwrap();
-        match device_type {
-            // You know, the whole point of atomics was to NOT lock things, but, for some bloody reason. property change signals lock. Why? Who knows?!
-            DeviceType::Keyboard => {
-                device.has_keyboard.store(true, Ordering::Release);
-                interface.get().await.has_keyboard_changed(interface.signal_emitter()).await.unwrap();
-            },
-            DeviceType::Mouse => {
-                device.has_mouse.store(true, Ordering::Release);
-                interface.get().await.has_mouse_changed(interface.signal_emitter()).await.unwrap();
-            }
+        let mut device = interface.get_mut().await;
+        let result = match notification {
+            Notification::KeyboardAvailable => device.set_keyboard(true, interface.signal_emitter()).await,
+            Notification::MouseAvailable => device.set_mouse(true, interface.signal_emitter()).await,
+            Notification::Suspend => device.set_power(PowerStatus::Suspended, interface.signal_emitter()).await,
+            Notification::Wake => device.set_power(PowerStatus::Active, interface.signal_emitter()).await            
+        };
+        if let Err(error) = result {
+            warn!("Error sending {:?} notification to {}: {}", notification, path, error)
         }
         
     }

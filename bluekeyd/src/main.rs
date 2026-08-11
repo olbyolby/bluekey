@@ -1,8 +1,8 @@
 use std::{collections::{HashMap, hash_map::Entry}, ops::Deref, path::Path, str::FromStr, sync::Arc};
 
-use bluer::{Adapter, Address};
+use bluer::{Adapter, AdapterEvent, Address};
 use evdev::KeyCode;
-use futures::StreamExt;
+use futures::{Stream, StreamExt, pin_mut};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
@@ -40,14 +40,20 @@ impl IdSource {
 
 
 enum Bridge {
-    Keyboard(KeyboardBridge),
-    Mouse(MouseBridge)
+    Keyboard(KeyboardBridge, Address),
+    Mouse(MouseBridge, Address)
 }
 impl Bridge {
     async fn cancel(self) -> Result<(), EvdevBridgeError> {
         match self {
-            Self::Keyboard(keyboard) => keyboard.cancel().await.map(|_| ()),
-            Self::Mouse(mouse) => mouse.cancel().await
+            Self::Keyboard(keyboard, _) => keyboard.cancel().await.map(|_| ()),
+            Self::Mouse(mouse, _) => mouse.cancel().await
+        }
+    }
+    fn target(&self) -> Address {
+        match self {
+            Self::Keyboard(_, address) => *address,
+            Self::Mouse(_, address) => *address
         }
     }
 }
@@ -117,6 +123,24 @@ impl Bluekey {
             info!("Cleaned handle {} from escape or error", bridge);
         }
     }
+    async fn device_disconnection_bridge_cleaner(source: impl Stream<Item=AdapterEvent>, bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>, connection: Connection) -> Result<(), bluer::Error> {
+        pin_mut!(source);
+
+        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").unwrap();
+        while let Some(event) = source.next().await {
+            if let AdapterEvent::DeviceRemoved(address) = event {
+                let mut bridges = bridges.lock().await;
+                for (handle, (_, bridge)) in bridges.extract_if(|_, (_, bridge)| bridge.target() == address) {
+                    if let Err(error) = bridge.cancel().await {
+                        warn!("Bridge with handle {} failed with error: {:?}", handle, error);
+                    }
+
+                    emitter.bridge_broken(handle).await.unwrap();
+                }                
+            }
+        };
+        Ok(())
+    }
 
     async fn start(adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>) -> Result<Connection, zbus::Error> {
         let bridges = Arc::new(Mutex::new(HashMap::new()));
@@ -152,6 +176,7 @@ impl Bluekey {
 
         tokio::spawn(Self::disconnection_bridge_cleaner(source, bridges.clone(), connection.clone()));
         tokio::spawn(Self::death_bridge_cleaner(reciever, bridges.clone(), connection.clone()));
+        tokio::spawn(Self::device_disconnection_bridge_cleaner(adapter.clone().events().await.unwrap(), bridges.clone(), connection.clone()));
         tokio::spawn(devices::devices_tracker(connection.clone(), adapter.clone(), keyboard.clone(), mouse.clone()));
        
         Ok(connection)
@@ -177,7 +202,7 @@ impl Bluekey {
         
         // Acquire ID and store bridge
         let id = self.bridge_id_source.next();
-        self.bridges.lock().await.insert(id, (name.into(), Bridge::Mouse(bridge)));
+        self.bridges.lock().await.insert(id, (name.into(), Bridge::Mouse(bridge, mac)));
         
         
         info!("Started mouse bridge from {} to {} with handle {}", mouse.display(), mac, id);
@@ -204,7 +229,7 @@ impl Bluekey {
         );        
         
         // Store the bridge
-        self.bridges.lock().await.insert(id, (name.into(), Bridge::Keyboard(bridge)));
+        self.bridges.lock().await.insert(id, (name.into(), Bridge::Keyboard(bridge, mac)));
 
         info!("Started keyboard bridge from {} to {} with handle {}", keyboard.display(), mac, id);
         Ok(id)

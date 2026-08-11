@@ -1,10 +1,10 @@
 use std::sync::{Arc, Weak};
 
-use bluer::Address;
+use bluer::{AdapterEvent, Address};
 use bluer::gatt::CharacteristicWriter;
 use bluer::gatt::local::{Application, CharacteristicControlEvent, ReqError, Service};
 use bluer::{Adapter, adv::Advertisement, gatt::local::characteristic_control};
-use futures::StreamExt;
+use futures::{StreamExt, pin_mut};
 use log::{debug, info};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
@@ -233,6 +233,12 @@ const DEFAULT_STATE: IndividualMouse = IndividualMouse {
 };
 
 async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: broadcast::Sender<MouseReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>) {
+    let disconnect_events = adapter.events().await.expect("Couldn't monitor adapter events").filter_map(async |event|{
+        match event {
+            AdapterEvent::DeviceRemoved(address) => Some(address),
+            _ => None
+        }
+    });
 
     // Start advertising the keyboard functionality
     let advertisement_handle = adapter.advertise(Advertisement {
@@ -310,8 +316,11 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
     enum Event {
         BootReportNotify(CharacteristicWriter),
         ReportNotify(CharacteristicWriter),
-        MouseEvent(MouseEvent)
+        MouseEvent(MouseEvent),
+        DeviceDisconnect(Address)
     }
+
+    pin_mut!(disconnect_events);
     let mut events = async move || {
         tokio::select! {
             event = boot_input_control.next() => match event {
@@ -325,7 +334,8 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
             event = receiever.recv() => match event {
                 Some(event) => Some(Event::MouseEvent(event)),
                 None => None
-            }
+            },
+            event = disconnect_events.next() => Some(Event::DeviceDisconnect(event.expect("Adapter event stream error.")))
         }
     };
 
@@ -340,6 +350,9 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
             Event::ReportNotify(writer) => {
                 let state = state.acquire_device(writer.device_address()).await;
                 state.report = Some(writer)
+            },
+            Event::DeviceDisconnect(address) => {
+                state.disconnect_device(address).await;
             },
             Event::MouseEvent(event) => match event {
                 MouseEvent::ButtonPress(target, button) => {
