@@ -5,9 +5,9 @@ Bluekey is a command line utility enabling a computer to act as a Bluetooth keyb
 Bluekey supports running as both a system daemon, accessible via DBus, and as a standalone utility. While in daemon mode, you can use your computer, switch between remote devices, or do other things without stopping the keyboard and mouse servers, while running as a standalone utility allows it to be ran without run time dependencies and across more environments.
 
 ## Usage 
-Currently, Bluekey can be uesed standalone as follows
+The Bluekey client can be used as follows, defaulting to using the daemon, using standalone if there is none.
 ```
-Usage: bluekeyd [OPTIONS] --mac <MAC> <--keyboard <KEYBOARD>|--mouse <MOUSE>>
+Usage: bluekey [OPTIONS] --mac <MAC> <--keyboard <KEYBOARD>|--mouse <MOUSE>>
 Options:
   -k, --keyboard <KEYBOARD>  Path to keyboard device to forward
   -m, --mouse <MOUSE>        Path to mouse device to forward
@@ -15,6 +15,7 @@ Options:
       --skip-wait            Skip the short delay before grabing the keyboard(delay is to avoid a stuck enter key)
   -h, --help                 Print help (see more with '--help')
 ```
+The daemon can be started by running it's command without any arguments, `bluekeyd`. To access /dev/input devices, it will need to either be run as root, or, more perferable, as part of the input group, using something like `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash` to use the group temporarily. 
 
 
 ## Implementation
