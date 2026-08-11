@@ -1,8 +1,4 @@
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::io::Write;
-use std::path::Path;
-use std::{path::PathBuf, str::FromStr};
+use std::{path::{PathBuf, Path}, io::Write, fmt::Display, collections::HashMap, str::FromStr};
 
 use bluer::{Address, InvalidAddress};
 use futures::StreamExt;
@@ -11,8 +7,11 @@ use zbus::proxy;
 use clap::{Parser, Subcommand, Args};
 use zvariant::OwnedValue;
 
+use crate::format::Groupable;
+
 mod ev_key_map;
 mod wait_enter;
+mod format;
 
 #[proxy(
     interface="us.colbystuff.Bluekey.Bridge1",
@@ -50,6 +49,9 @@ trait BluekeyDevice {
 
     #[zbus(property)]
     fn has_mouse(&self) -> Result<bool, zbus::fdo::Error>;
+
+    #[zbus(property)]
+    fn power(&self) -> Result<u8, zbus::fdo::Error>;
 }
 
 
@@ -297,34 +299,60 @@ fn read_field<'a, 'b, T: TryFrom<&'b OwnedValue>>(properties: &'b HashMap<String
     Ok(properties.get(name).ok_or(error.clone())?.try_into().map_err(|_| error)?)
 }
 
+
+
 async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
     // Establish DBus connection
     let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
     let manager = zbus::fdo::ObjectManagerProxy::new(&connection, "us.colbystuff.Bluekey", "/us/colbystuff/Bluekey/devices").await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
 
     const STAGE: &'static str = "reading device properties";
+    const DIM: format::AnsiFormat<'static> = format::AnsiFormat::new("\x1B[2m", "\x1B[22m");
+    const NONE: format::AnsiFormat<'static> = format::AnsiFormat::new("", "");
+    let mut had_any = false;
+
+    let mut entry = match cli.detailed {
+        true => std::io::stdout().into_group("\n"),
+        false => std::io::stdout().into_group(", ")
+    };
     for (_, data) in manager.get_managed_objects().await.map_err(|e| Error::DbusConnection("reading active devices", e.into()))? {
         if let Some(interface) = data.get("us.colbystuff.Bluekey.Device1") {
             let address: &str = read_field(interface, "Address", STAGE)?;
             let keyboard: bool = read_field(interface, "HasKeyboard", STAGE)?;
             let mouse: bool  = read_field(interface, "HasMouse", STAGE)?;
+            let power: u8 = read_field(interface, "Power", STAGE)?; 
+            had_any = true;
+
+            let entry = entry.next().unwrap();
+            let address = format::AnsiFormat::wrap(match power {
+                1 => DIM,
+                _ => NONE,
+            }, &address);
 
             match cli.detailed {
-                false => print!("{}", address),
+                false => write!(entry, "{}", address).unwrap(),
                 true => {
-                    print!("Address: {}, ", address);
+                    write!(entry, "Address: {}; ", address).unwrap();
+                
+                    let mut devices = entry.group(", ");
                     if keyboard {
-                        print!("Keyboard");
+                        write!(devices.next().unwrap(), "Keyboard").unwrap();
                     }
                     if mouse {
-                        print!("Mouse");
+                        write!(devices.next().unwrap(), "Mouse").unwrap();
                     }
                 }
             }
 
-            print!("\n");
         }
     }
+
+    if !had_any {
+        println!("No devices connected.");
+    } else {
+        print!("\n");
+    }
+
     std::io::stdout().flush().unwrap();
 
     Ok(())

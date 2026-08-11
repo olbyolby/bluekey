@@ -3,7 +3,7 @@ use std::{collections::{HashMap, hash_map::Entry}, ops::Deref, path::Path, str::
 use bluer::{Adapter, AdapterEvent, Address};
 use evdev::KeyCode;
 use futures::{Stream, StreamExt, pin_mut};
-use log::{debug, info, warn};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 use zbus::{Connection, fdo::NameOwnerChangedStream, interface, message::Header, names::OwnedUniqueName, object_server::SignalEmitter};
@@ -278,7 +278,6 @@ impl Config {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), zbus::Error> {
     env_logger::init();
-    debug!("Test log");
 
     let session = bluer::Session::new().await.unwrap();
     let adapter = Arc::new(session.default_adapter().await.unwrap());
