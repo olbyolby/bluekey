@@ -2,6 +2,7 @@ mod data;
 
 use std::sync::{Arc, Weak};
 
+use crate::bluetooth::leds::Led;
 use crate::bluetooth::{DeviceMap, Register, ReturnEventListener};
 
 use super::Target;
@@ -51,7 +52,7 @@ pub struct Keyboard {
     channel: mpsc::Sender<KeyboardEvent>,
     _returns: broadcast::Receiver<KeyboardReturnEvent>, 
     returns_sender: broadcast::Sender<KeyboardReturnEvent>,
-    state: Weak<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>,
+    state: Weak<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>,
     handle: JoinHandle<()>
 }
 impl Keyboard {
@@ -116,8 +117,10 @@ impl Drop for Keyboard {
     }
 }
 
+// Until RwLockReadGuard::map() is stabalized, we have to do this annoying mess.
+// See: https://github.com/rust-lang/rust/issues/117108
 pub struct DevicesView {
-    state: Arc<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>
+    state: Arc<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>
 }
 impl DevicesView {
     #[allow(dead_code)]
@@ -131,11 +134,13 @@ impl DevicesView {
             map(address);
         }
     }
+    pub async fn get<F: FnOnce(Option<&KeyboardState>) -> T, T>(&self, address: Address, callback: F) -> T {
+        let lock = self.state.read().await;
+        callback(lock.get_device(address))
+    }
 }
 
-
-
-struct IndividualState {
+pub struct KeyboardState {
     keys: [u8; 6],
     modifiers: u8,
     leds: u8,
@@ -144,12 +149,12 @@ struct IndividualState {
     boot: Option<CharacteristicWriter>,
     report: Option<CharacteristicWriter>
 }
-impl Default for IndividualState {
+impl Default for KeyboardState {
     fn default() -> Self {
         DEFAULT_STATE
     }
 }
-impl IndividualState {
+impl KeyboardState {
     async fn send_report(&self) {
         let report = {
             let mut report = [0; 8];
@@ -168,9 +173,15 @@ impl IndividualState {
         }
 
     }
+
+    pub fn led_state(&self) -> impl Iterator<Item=(Led, bool)> {
+        (1..=5).map(|i| (i-1, Led::from_usb_id(i).unwrap())).map(|(offset, led)| {
+            (led, (1<<offset) & self.leds != 0)
+        })
+    }
 }
 
-const DEFAULT_STATE: IndividualState = IndividualState {
+const DEFAULT_STATE: KeyboardState = KeyboardState {
     keys: [0,0,0,0,0,0],
     modifiers: 0,
     leds: 0,
@@ -180,7 +191,7 @@ const DEFAULT_STATE: IndividualState = IndividualState {
     report: None
 };
 
-async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: broadcast::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>) {
+async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: broadcast::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>) {
     let disconnect_events = adapter.events().await.expect("Couldn't monitor adapter events").filter_map(async |event|{
         match event {
             AdapterEvent::DeviceRemoved(address) => Some(address),
@@ -292,11 +303,11 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                         drop(state);
 
                         debug!("off: {:b}, on: {:b}", now_off, now_on);
-                        for (id, led) in (1..=5).map(|i| (i, Led::try_from(i).unwrap())) {
-                            if (1<<id) & now_on != 0 {
+                        for (offset, led) in (1..=5).map(|i| (i-1, Led::from_usb_id(i).unwrap())) {
+                            if (1<<offset) & now_on != 0 {
                                 debug!("{:?} went on", led);
                                 return_sender.send(KeyboardReturnEvent::LedOn(request.device_address, led)).unwrap();
-                            } else if (1<<id )& now_off != 0 {
+                            } else if (1<<offset )& now_off != 0 {
                                 debug!("{:?} went off", led);
                                 return_sender.send(KeyboardReturnEvent::LedOff(request.device_address, led)).unwrap();
                             }

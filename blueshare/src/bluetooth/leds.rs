@@ -1,33 +1,27 @@
 macro_rules! make_table {
-    ($name:ident {$($id:ident = $value:literal),*}) => {
-        #[derive(Clone, Copy, Debug)]
+    ($name:ident {$($id:ident = $value:literal$(,$evdev:literal)?),*}) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum $name {
             $($id),*
         }
 
         impl $name {
-            pub fn from_id(id: u8) -> Result<Self, InvalidId> {
+            pub fn from_usb_id(id: u8) -> Result<Self, InvalidId> {
                 match id {
                     $($value => Ok(Self::$id)),*,
                     _ => Err(InvalidId)
                 }
             }
-            pub fn into_id(&self) -> u8 {
+            pub fn usb_id(self) -> u8 {
                 match self {
                     $(Self::$id => $value),*
                 }
             }
-        }
-        impl Into<u8> for $name {
-            fn into(self) -> u8 {
-                self.into_id()
-            }
-        }
-
-        impl TryFrom<u8> for $name {
-            type Error = InvalidId;
-            fn try_from(value: u8) -> Result<Self, InvalidId> {
-                Self::from_id(value)
+            pub fn ev_dev_id(self) -> Option<u8> {
+                match self {
+                    $($(Self::$id => Some($evdev),)?)*
+                    _ => None
+                }
             }
         }
     }
@@ -35,15 +29,17 @@ macro_rules! make_table {
 
 // Big list of every keyboard LED supported by the USB standard
 // See HID usage tables "LEDs"(pg 97)
+// Includes IDs for those mapped to event dev LEDs
+// See input-event-codes.h
 #[derive(Clone, Copy, Debug)]
 pub struct InvalidId;
 make_table!(Led {
-    NumLock = 0x01,
-    CapsLock = 0x02,
-    ScrollLock = 0x03,
-    Compose = 0x04,
-    Kana = 0x05,
-    Power = 0x06,
+    NumLock = 0x01, 0x00,
+    CapsLock = 0x02, 0x01,
+    ScrollLock = 0x03, 0x02,
+    Compose = 0x04, 0x03,
+    Kana = 0x05, 0x04,
+    Power = 0x06, 0x05,
     Shift = 0x07,
     DoNotDisturb = 0x08,
     Mute = 0x09,
@@ -113,7 +109,7 @@ make_table!(Led {
     IndicatorGreen = 0x49,
     IndicatorAmber = 0x4A,
     GenericIndicator = 0x4B,
-    SystemSuspend = 0x4C,
+    SystemSuspend = 0x4C, 0x06,
     ExternalPowerConnected = 0x4D,
     IndicatorBlue = 0x4E,
     IndicatorOrange = 0x4F,
@@ -124,7 +120,7 @@ make_table!(Led {
     BlueLedChannel = 0x54,
     GreenLedChannel = 0x55,
     LedIntensity = 0x56,
-    SystemMicrophoneMute = 0x57,
+    SystemMicrophoneMute = 0x57, 0x07,
     PlayerIndicator = 0x60,
     Player1 = 0x61,
     Player2 = 0x62,

@@ -164,6 +164,17 @@ async fn evdev_keyboard_bridge<T: Borrow<Keyboard> + Send + 'static>(keyboard: T
     };
 
     let mut keyboard_events = keyboard.listen();
+    // Load keyboard's current LED events
+    if let Target::Target(address) = target {
+        keyboard.devices()?.get(address, |state| {
+            if let Some(state) = state {
+                for (led, state) in state.led_state() {
+                    set_led(device.device_mut(), led, state)?;
+                }
+            }
+            Ok::<(), EvdevBridgeError>(())
+        }).await?
+    };
 
     loop {
         tokio::select! {
@@ -213,9 +224,14 @@ fn set_led(device: &mut Device, led: Led, on: bool) -> Result<(), std::io::Error
         false => 0
     };
 
-    device.send_events(&[
-        InputEvent::new(evdev::EventType::LED.0, led.into_id().into(), on)
-    ])
+    if let Some(id) = led.ev_dev_id() {
+        device.send_events(&[
+            InputEvent::new(evdev::EventType::LED.0, id.into(), on)
+        ])?;
+    };
+
+    Ok(())
+    
 }
 
 struct Clock {
