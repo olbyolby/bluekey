@@ -66,6 +66,10 @@ impl<T: Default, E: From<Register> + Debug> DeviceMap<T, E> {
             Target::Target(target) => TargetIter::Target(self.get_device_mut(target).map(|device| std::iter::once(device)))
         }
     }
+
+    async fn disconnect_device(&mut self, address: Address) -> () {
+        self.devices.remove(&address);
+    }
 }
 
 pub enum ReturnError {

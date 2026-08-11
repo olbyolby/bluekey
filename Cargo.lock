@@ -184,6 +184,7 @@ dependencies = [
  "keycode",
  "log",
  "serde",
+ "serde_repr",
  "tokio",
  "zbus",
  "zvariant",

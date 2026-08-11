@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, hash_map::Entry}, ops::Deref, path::Path, str::FromStr, sync::Arc};
 
-use bluer::Address;
+use bluer::{Adapter, Address};
 use evdev::KeyCode;
 use futures::StreamExt;
 use log::{debug, info, warn};
@@ -11,12 +11,11 @@ use zbus::{Connection, fdo::NameOwnerChangedStream, interface, message::Header, 
 use blueshare::{bluetooth::{Target, keyboard::Keyboard, mouse::Mouse}, evdev_bridge::{SharedShortcut, Shortcut}};
 use blueshare::evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+mod devices;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize, zvariant::Type)]
 #[serde(transparent)]
 struct Id(u64);
-impl zvariant::Type for Id {
-    const SIGNATURE: &'static zvariant::Signature = &zvariant::signature!("t");
-}
 impl std::fmt::Display for Id {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "<{}>", self.0)?;
@@ -119,8 +118,7 @@ impl Bluekey {
         }
     }
 
-
-    async fn start(keyboard: Keyboard, mouse: Mouse) -> Result<Connection, zbus::Error> {
+    async fn start(adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>) -> Result<Connection, zbus::Error> {
         let bridges = Arc::new(Mutex::new(HashMap::new()));
         let (sender, reciever) = mpsc::channel(16);
         
@@ -133,8 +131,8 @@ impl Bluekey {
 
                 escape_shortcut: escape_shortcut.clone(),
 
-                keyboard_server: Arc::new(keyboard),
-                mouse_server: Arc::new(mouse),
+                keyboard_server: keyboard.clone(),
+                mouse_server: mouse.clone(),
             };
 
             let config = Config {
@@ -154,6 +152,7 @@ impl Bluekey {
 
         tokio::spawn(Self::disconnection_bridge_cleaner(source, bridges.clone(), connection.clone()));
         tokio::spawn(Self::death_bridge_cleaner(reciever, bridges.clone(), connection.clone()));
+        tokio::spawn(devices::devices_tracker(connection.clone(), adapter.clone(), keyboard.clone(), mouse.clone()));
        
         Ok(connection)
     }
@@ -244,10 +243,11 @@ struct Config {
 #[interface(name = "us.colbystuff.Bluekey.Configuration1")]
 impl Config {
     #[zbus(property)]
-    fn get_keyboard_escape_shortcut(&self) -> Vec<u16> {
+    fn keyboard_escape_shortcut(&self) -> Vec<u16> {
         self.keyboard_escape_shortcut.keys().iter().map(|code| code.0).collect()
     }
 }
+
 
 
 #[tokio::main(flavor = "current_thread")]
@@ -258,9 +258,9 @@ async fn main() -> Result<(), zbus::Error> {
     let session = bluer::Session::new().await.unwrap();
     let adapter = Arc::new(session.default_adapter().await.unwrap());
 
-    let keyboard = Keyboard::new(adapter.clone());
-    let mouse = Mouse::new(adapter);
-    let connection = Bluekey::start(keyboard, mouse).await?;
+    let keyboard = Arc::new(Keyboard::new(adapter.clone()));
+    let mouse = Arc::new(Mouse::new(adapter.clone()));
+    let connection = Bluekey::start(adapter.clone(), keyboard, mouse).await?;
     
     std::future::pending::<()>().await;    
     drop(connection);

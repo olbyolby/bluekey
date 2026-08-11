@@ -31,7 +31,7 @@ trait BluekeyBridge {
 )]
 trait BluekeyConfig {
     #[zbus(property)]
-    fn get_keyboard_escape_shortcut(&self) -> Result<Shortcut, zbus::fdo::Error>;
+    fn keyboard_escape_shortcut(&self) -> Result<Shortcut, zbus::fdo::Error>;
 
 }
 
@@ -211,7 +211,7 @@ async fn command<'a>(cli: &'a Cli) -> Result<(), Error<'a>> {
 
         let keyboard = match &cli.devices.keyboard {
             Some(keyboard) => {
-                println!("Press {} to break keyboard grab.", config.get_keyboard_escape_shortcut().await.map_err(|e| Error::Keyboard(e))?);
+                println!("Press {} to break keyboard grab.", config.keyboard_escape_shortcut().await.map_err(|e| Error::Keyboard(e))?);
                 Some(proxy.bridge_keyboard(&keyboard, &address).await.map_err(|e| Error::Keyboard(e)))
             },
             None => None

@@ -9,9 +9,9 @@ use super::Target;
 use super::hid::{self, Protocol};
 use super::hid::characteristics::callback;
 
-use bluer::Address;
+use bluer::{AdapterEvent, Address};
 use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, ReqError, Service, characteristic_control}}};
-use futures::StreamExt;
+use futures::{StreamExt, pin_mut};
 use tokio::sync::{RwLock, mpsc, broadcast};
 use log::{debug, info};
 use tokio::task::JoinHandle;
@@ -181,6 +181,13 @@ const DEFAULT_STATE: IndividualState = IndividualState {
 };
 
 async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: broadcast::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<IndividualState, KeyboardReturnEvent>>>) {
+    let disconnect_events = adapter.events().await.expect("Couldn't monitor adapter events").filter_map(async |event|{
+        match event {
+            AdapterEvent::DeviceRemoved(address) => Some(address),
+            _ => None
+        }
+    });
+    
     // Start advertising the keyboard functionality
     let advertisement_handle = adapter.advertise(Advertisement {
        advertisement_type: bluer::adv::Type::Peripheral,
@@ -308,8 +315,11 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
     enum Event {
         Keyboard(KeyboardEvent),
         BootReportNotify(CharacteristicWriter),
-        ReportNotify(CharacteristicWriter)
+        ReportNotify(CharacteristicWriter),
+        DeviceDisconnect(Address)
     }
+    
+    pin_mut!(disconnect_events);
     let mut events = async move || {
         tokio::select! {
             event = receiver.recv() => event.map(|event| Event::Keyboard(event)),
@@ -320,7 +330,8 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
             event = report_input_control.next() => match event {
                 Some(CharacteristicControlEvent::Notify(writer)) => Some(Event::ReportNotify(writer)),
                 _ => panic!("Invalid")
-            }
+            },
+            event = disconnect_events.next() => Some(Event::DeviceDisconnect(event.expect("Adapter event stream error.")))
         }
     };
 
@@ -365,6 +376,9 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                 let address = writer.device_address();
                 state.acquire_device(address).await.report = Some(writer)
             }
+            Event::DeviceDisconnect(address) => {
+                state.disconnect_device(address).await;
+            },
         }
     }
 
