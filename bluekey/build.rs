@@ -139,9 +139,19 @@ fn main() {
     let file = std::fs::File::open(DEFINITION_PATH).unwrap();
 
     let mut result = std::fs::File::create(output_directory.join(OUTPUT_PATH)).unwrap();
+    let defines: Vec<(String, u16)> = read_defines(file, &mut log).collect();
+
     writeln!(result, "pub fn evdev_keycode_to_name(code: u16) -> Option<&'static str> {{\n  match code {{").unwrap();
-    for (name, value) in read_defines(file, &mut log) {
+    for (name, value) in defines.iter().cloned() {
         write!(result, "    {} => Some(\"{}\"),\n", value, name).unwrap();
+    }
+    writeln!(result, "    _ => None").unwrap();
+    writeln!(result, "  }}").unwrap();
+    writeln!(result, "}}").unwrap();
+
+    writeln!(result, "pub fn name_to_evdev_keycode(code: &str) -> Option<u16> {{\n  match code {{").unwrap();
+    for (name, value) in defines {
+        write!(result, "    \"{}\" => Some({}),\n", name, value).unwrap();
     }
     writeln!(result, "    _ => None").unwrap();
     writeln!(result, "  }}").unwrap();

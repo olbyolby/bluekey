@@ -271,6 +271,12 @@ impl Config {
     fn keyboard_escape_shortcut(&self) -> Vec<u16> {
         self.keyboard_escape_shortcut.keys().iter().map(|code| code.0).collect()
     }
+
+    #[zbus(property)]
+    fn set_keyboard_escape_shortcut(&self, value: Vec<u16>) {
+        let value = value.into_iter().map(|value| KeyCode::new(value)).collect();
+        self.keyboard_escape_shortcut.update(Arc::new(value));
+    }
 }
 
 

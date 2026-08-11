@@ -5,7 +5,7 @@ use futures::StreamExt;
 use log::warn;
 use zbus::proxy;
 use clap::{Parser, Subcommand, Args};
-use zvariant::OwnedValue;
+use zvariant::{OwnedValue};
 
 use crate::format::Groupable;
 
@@ -35,6 +35,8 @@ trait BluekeyConfig {
     #[zbus(property)]
     fn keyboard_escape_shortcut(&self) -> Result<Shortcut, zbus::fdo::Error>;
 
+    #[zbus(property)]
+    fn set_keyboard_escape_shortcut(&self, value: Shortcut) -> Result<(), zbus::fdo::Error>;
 }
 #[proxy(
     interface="us.colbystuff.Bluekey.Device1",
@@ -93,10 +95,22 @@ impl<'a> HandleWrapper<'a> {
 struct Shortcut {
     keys: Vec<u16>
 }
+impl Shortcut {
+    fn new(keys: Vec<u16>) -> Self {
+        Self {
+            keys
+        }
+    }
+}
 impl TryFrom<zvariant::OwnedValue> for Shortcut {
     type Error = zvariant::Error;
     fn try_from(value: zvariant::OwnedValue) -> Result<Self, Self::Error> {
         Ok(Self { keys: Vec::<u16>::try_from(value)?})
+    }
+}
+impl<'a> Into<zvariant::Value<'a>> for Shortcut {
+    fn into(self) -> zvariant::Value<'a> {
+        self.keys.into()
     }
 }
 impl Display for Shortcut {
@@ -136,7 +150,9 @@ enum Commands {
     /// `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash`
     Bridge(Bridge),
     /// List all devices known to Bluekey as listening for keyboard or mouse input
-    List(List)
+    List(List),
+    /// Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard.
+    EscapeShortcut(EscapeShortcut)
 }
 #[derive(Args)]
 struct Bridge {
@@ -151,6 +167,10 @@ struct List {
     #[arg(short, long)]
     // List details about each device(keyboard or mouse support)
     detailed: bool
+}
+#[derive(Args)]
+struct EscapeShortcut {
+    shortcut: Option<String>
 }
 
 #[derive(Args)]
@@ -191,8 +211,28 @@ impl Display for DBusError {
 }
 
 #[derive(Clone)]
+enum ShortcutFormattingError<'a> {
+    InvalidCharacter(char),
+    InvalidKey(&'a str)
+}
+impl<'a> Display for ShortcutFormattingError<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCharacter(character) => write!(f, "Invalid character \"{}\" in shortcut.", character),
+            Self::InvalidKey(name) => write!(f, "Unknown key \"{}\" in shortcut.", name)
+        }
+    }
+}
+impl<'a> From<ShortcutFormattingError<'a>> for Error<'a> {
+    fn from(value: ShortcutFormattingError<'a>) -> Self {
+        Self::ShortcutFormatting(value)
+    }
+}
+
+#[derive(Clone)]
 enum Error<'a> {
     AddressFormatting(&'a str, InvalidAddress),
+    ShortcutFormatting(ShortcutFormattingError<'a>),
     DbusConnection(&'static str, DBusError),
     Keyboard(zbus::fdo::Error),
     Mouse(zbus::fdo::Error),
@@ -214,9 +254,10 @@ impl<'a> Display for Error<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AddressFormatting(address, error) => write!(f, "Invalid text \"{}\" in address \"{}\"", error.0, address),
+            Self::ShortcutFormatting(error) => error.fmt(f),
             Self::Keyboard(error) => Self::device_error(f, "keyboard", error),
             Self::Mouse(error) => Self::device_error(f, "mouse", error),
-            Self::DbusConnection(stage, e) => write!(f, "DBus error while {}: {}", stage, e),
+            Self::DbusConnection(stage, e) => write!(f, "DBus error while {}: {}", stage, e)
         }
     }
 }
@@ -228,7 +269,8 @@ async fn main() {
 
     let result = match &cli.command {
         Commands::Bridge(args) => bridge(args).await,
-        Commands::List(args) => list(args).await
+        Commands::List(args) => list(args).await,
+        Commands::EscapeShortcut(args) => escape_shortcut(args).await
     };
     if let Err(error) = result{
         println!("{}", error);
@@ -298,9 +340,6 @@ fn read_field<'a, 'b, T: TryFrom<&'b OwnedValue>>(properties: &'b HashMap<String
     let error = Error::DbusConnection(stage, DBusError::InvalidProperty);
     Ok(properties.get(name).ok_or(error.clone())?.try_into().map_err(|_| error)?)
 }
-
-
-
 async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
     // Establish DBus connection
     let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
@@ -354,6 +393,37 @@ async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
     }
 
     std::io::stdout().flush().unwrap();
+
+    Ok(())
+}
+
+async fn escape_shortcut<'a>(cli: &'a EscapeShortcut) -> Result<(), Error<'a>> {
+    let shortcut = cli.shortcut.as_ref().map(|text| {
+        let mut shortcut: Vec<u16> = Vec::new();
+        for name in text.split("+") {
+            let name = name.trim();
+            if let Some(character) = name.chars().find(|c| !c.is_alphanumeric() && *c != '_') {
+                return Err(ShortcutFormattingError::InvalidCharacter(character))
+            }
+            
+            shortcut.push(ev_key_map::name_to_evdev_keycode(name).ok_or(ShortcutFormattingError::InvalidKey(name))?);
+        }
+        
+        Ok(Shortcut::new(shortcut))
+    }).transpose()?;
+
+
+    let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+    let config = BluekeyConfigProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
+
+    match shortcut {
+        Some(shortcut) => {
+            config.set_keyboard_escape_shortcut(shortcut).await.map_err(|e| Error::DbusConnection("setting keyboard shortcut", e.into()))?
+        },
+        None => {
+            println!("Keyboard shortcut is: {}", config.keyboard_escape_shortcut().await.map_err(|e| Error::DbusConnection("reading escape shortcut", e.into()))?)
+        }
+    };
 
     Ok(())
 }
