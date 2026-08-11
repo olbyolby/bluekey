@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::fmt::Display;
+use std::io::Write;
 use std::path::Path;
 use std::{path::PathBuf, str::FromStr};
 
@@ -6,7 +8,8 @@ use bluer::{Address, InvalidAddress};
 use futures::StreamExt;
 use log::warn;
 use zbus::proxy;
-use clap::Parser;
+use clap::{Parser, Subcommand, Args};
+use zvariant::OwnedValue;
 
 mod ev_key_map;
 mod wait_enter;
@@ -33,6 +36,20 @@ trait BluekeyConfig {
     #[zbus(property)]
     fn keyboard_escape_shortcut(&self) -> Result<Shortcut, zbus::fdo::Error>;
 
+}
+#[proxy(
+    interface="us.colbystuff.Bluekey.Device1",
+    default_service="us.colbystuff.Bluekey"
+)]
+trait BluekeyDevice {
+    #[zbus(property)]
+    fn address(&self) -> Result<String, zbus::fdo::Error>;
+
+    #[zbus(property)]
+    fn has_keyboard(&self) -> Result<bool, zbus::fdo::Error>;
+
+    #[zbus(property)]
+    fn has_mouse(&self) -> Result<bool, zbus::fdo::Error>;
 }
 
 
@@ -102,28 +119,39 @@ impl Display for Shortcut {
 
 
 #[derive(Parser)]
-#[command(name = "bluekeyd")]
-/// Pass a keyboard or mouse through an emulated Bluetooth device
-///
-/// Emulate a Bluetooth keyboard or mouse service from this computer,
-/// forwarding a keyboard or mouse on this device through it.
-/// Enables sharing a mouse or keyboard with another device via Bluetooth,
-/// without the need of a special app or software.
-/// 
-/// Note: You may need to run this program with the input group to access
-/// evdev devices. An easy way to temporarily open a hash with this group is:
-/// `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash`
+#[command(name = "bluekey")]
+/// CLI interface for Bluekey, a Bluetooth keyboard/mouse emulator
 struct Cli {
+    #[command(subcommand)]
+    command: Commands
+}
+#[derive(Subcommand)]
+enum Commands {
+    /// Pass a keyboard or mouse through an emulated Bluetooth device
+    ///
+    /// Note: You may need to run this program with the input group to access
+    /// evdev devices. An easy way to temporarily open a hash with this group is:
+    /// `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash`
+    Bridge(Bridge),
+    /// List all devices known to Bluekey as listening for keyboard or mouse input
+    List(List)
+}
+#[derive(Args)]
+struct Bridge {
     #[clap(flatten)]
     devices: Devices,
-
     #[arg(long)]
     /// Mac address of device to connect
     mac: String,
-
-
 }
-#[derive(clap::Args)]
+#[derive(Args)]
+struct List {
+    #[arg(short, long)]
+    // List details about each device(keyboard or mouse support)
+    detailed: bool
+}
+
+#[derive(Args)]
 #[group(required = true)]
 struct Devices {
 
@@ -136,26 +164,36 @@ struct Devices {
     mouse: Option<PathBuf>,
 }
 
-enum ConnectionStage {
-    DBusConnection,
-    BluekeyProxy,
-    SignalListener
+#[derive(Clone)]
+enum DBusError {
+    InvalidProperty,
+    Zbus(zbus::fdo::Error)
 }
-impl Display for ConnectionStage {
+impl From<zbus::fdo::Error> for DBusError {
+    fn from(value: zbus::fdo::Error) -> Self {
+        Self::Zbus(value)
+    }
+}
+impl From<zbus::Error> for DBusError {
+    fn from(value: zbus::Error) -> Self {
+        Self::Zbus(value.into())
+    }
+}
+impl Display for DBusError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DBusConnection => write!(f, "connecting to DBus"),
-            Self::BluekeyProxy => write!(f, "connecting to Bluekey daemon"),
-            Self::SignalListener => write!(f, "listening for break signal")
+            Self::Zbus(error) => error.fmt(f),
+            Self::InvalidProperty => write!(f, "Recieved missing or invalid property from Bluekey.")
         }
     }
 }
 
+#[derive(Clone)]
 enum Error<'a> {
     AddressFormatting(&'a str, InvalidAddress),
-    DbusConnection(ConnectionStage, zbus::Error),
+    DbusConnection(&'static str, DBusError),
     Keyboard(zbus::fdo::Error),
-    Mouse(zbus::fdo::Error)
+    Mouse(zbus::fdo::Error),
 }
 impl<'a> Error<'a> {
     fn device_error(formater: &mut std::fmt::Formatter<'_>, device: &'static str, error: &zbus::fdo::Error) -> std::fmt::Result {
@@ -176,7 +214,7 @@ impl<'a> Display for Error<'a> {
             Self::AddressFormatting(address, error) => write!(f, "Invalid text \"{}\" in address \"{}\"", error.0, address),
             Self::Keyboard(error) => Self::device_error(f, "keyboard", error),
             Self::Mouse(error) => Self::device_error(f, "mouse", error),
-            Self::DbusConnection(stage, e) => write!(f, "DBus error while {}: {}", stage, e)
+            Self::DbusConnection(stage, e) => write!(f, "DBus error while {}: {}", stage, e),
         }
     }
 }
@@ -186,23 +224,27 @@ async fn main() {
     env_logger::init();
     let cli = Cli::parse();
 
-    if let Err(error) = command(&cli).await {
+    let result = match &cli.command {
+        Commands::Bridge(args) => bridge(args).await,
+        Commands::List(args) => list(args).await
+    };
+    if let Err(error) = result{
         println!("{}", error);
     }
 }
 
 
-async fn command<'a>(cli: &'a Cli) -> Result<(), Error<'a>> { 
+async fn bridge<'a>(cli: &'a Bridge) -> Result<(), Error<'a>> { 
     // Parse the device's MAC address
     let (_target, address) = Address::from_str(&cli.mac).map(|address| (address, &cli.mac)).map_err(|e| Error::AddressFormatting(&cli.mac, e))?;
 
     // Establish DBus connection
-    let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection(ConnectionStage::DBusConnection, e))?;
-    let bridges = BluekeyBridgeProxy::new(&connection).await.map_err(|e| Error::DbusConnection(ConnectionStage::BluekeyProxy, e))?;
-    let config = BluekeyConfigProxy::new(&connection).await.map_err(|e| Error::DbusConnection(ConnectionStage::BluekeyProxy, e))?;
+    let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+    let bridges = BluekeyBridgeProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
+    let config = BluekeyConfigProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
 
     HandleWrapper::wrap(bridges, async |proxy| {
-        let mut breakage = proxy.proxy.receive_bridge_broken().await.map_err(|e| Error::DbusConnection(ConnectionStage::SignalListener, e))?;
+        let mut breakage = proxy.proxy.receive_bridge_broken().await.map_err(|e| Error::DbusConnection("listening for bridge breaks", e.into()))?;
 
         let mouse = match &cli.devices.mouse {
             Some(mouse) => Some(proxy.bridge_mouse(&mouse, &address).await.map_err(|e| Error::Mouse(e))),
@@ -250,5 +292,40 @@ async fn command<'a>(cli: &'a Cli) -> Result<(), Error<'a>> {
     Ok(())
 }
 
+fn read_field<'a, 'b, T: TryFrom<&'b OwnedValue>>(properties: &'b HashMap<String, OwnedValue>, name: &str, stage: &'static str) -> Result<T, Error<'a>> {
+    let error = Error::DbusConnection(stage, DBusError::InvalidProperty);
+    Ok(properties.get(name).ok_or(error.clone())?.try_into().map_err(|_| error)?)
+}
 
+async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
+    // Establish DBus connection
+    let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+    let manager = zbus::fdo::ObjectManagerProxy::new(&connection, "us.colbystuff.Bluekey", "/us/colbystuff/Bluekey/devices").await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
 
+    const STAGE: &'static str = "reading device properties";
+    for (_, data) in manager.get_managed_objects().await.map_err(|e| Error::DbusConnection("reading active devices", e.into()))? {
+        if let Some(interface) = data.get("us.colbystuff.Bluekey.Device1") {
+            let address: &str = read_field(interface, "Address", STAGE)?;
+            let keyboard: bool = read_field(interface, "HasKeyboard", STAGE)?;
+            let mouse: bool  = read_field(interface, "HasMouse", STAGE)?;
+
+            match cli.detailed {
+                false => print!("{}", address),
+                true => {
+                    print!("Address: {}, ", address);
+                    if keyboard {
+                        print!("Keyboard");
+                    }
+                    if mouse {
+                        print!("Mouse");
+                    }
+                }
+            }
+
+            print!("\n");
+        }
+    }
+    std::io::stdout().flush().unwrap();
+
+    Ok(())
+}
