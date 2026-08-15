@@ -351,6 +351,7 @@ struct Config {
 }
 #[interface(name = "us.colbystuff.Bluekey.Configuration1")]
 impl Config {
+    /// Keyboard shortcut to break out of keyboard forwarding, as a list of event dev key IDs
     #[zbus(property)]
     fn keyboard_escape_shortcut(&self) -> Vec<u16> {
         self.keyboard_escape_shortcut.keys().iter().map(|code| code.0).collect()
