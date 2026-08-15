@@ -1,11 +1,37 @@
-use std::{collections::{HashMap, hash_map::Entry}, fmt::Write, sync::Arc};
+use std::{
+    collections::{
+        HashMap,
+        hash_map::Entry
+    }, 
+    fmt::Write,
+    sync::Arc
+};
 
 use bluer::{Adapter, AdapterEvent, Address};
-use blueshare::bluetooth::{ReturnError, keyboard::{Keyboard, KeyboardReturnEvent}, mouse::{Mouse, MouseReturnEvent}};
+use blueshare::bluetooth::{
+    ReturnError, 
+    keyboard::{
+        Keyboard,
+        KeyboardReturnEvent
+    }, 
+    mouse::{
+        Mouse, 
+        MouseReturnEvent
+    }
+};
+
 use futures::StreamExt;
 use log::{info, warn};
+use never_say_never::Never;
 use serde::{Deserialize, Serialize};
-use zbus::{Connection, interface, object_server::{InterfaceRef, SignalEmitter}};
+use zbus::{
+    Connection, 
+    interface, 
+    object_server::{
+        InterfaceRef, 
+        SignalEmitter
+    }
+};
 
 
 #[derive(Deserialize, Serialize, zvariant::Type, zvariant::Value, PartialEq, Eq, Debug, Clone, Copy)]
@@ -116,10 +142,37 @@ impl DeviceMap {
     
 }
 
-pub async fn devices_tracker(connection: Connection, adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>) -> Result<(), ReturnError> {
+pub enum DeviceTrackerError {
+    Bluer(bluer::Error),
+    Dbus(zbus::Error),
+    Keyboard(ReturnError),
+    Mouse(ReturnError)
+}
+impl From<zbus::Error> for DeviceTrackerError {
+    fn from(value: zbus::Error) -> Self {
+        Self::Dbus(value)
+    }
+}
+impl From<bluer::Error> for DeviceTrackerError {
+    fn from(value: bluer::Error) -> Self {
+        Self::Bluer(value)
+    }
+}
+impl std::fmt::Display for DeviceTrackerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bluer(e) => write!(f, "Bluer error: {}", e),
+            Self::Dbus(e) => write!(f, "Dbus error: {}", e),
+            Self::Keyboard(e) => write!(f, "Keyboard {}", e),
+            Self::Mouse(e) => write!(f, "Mouse {}", e)
+        }
+    }
+}
+
+pub async fn devices_tracker(connection: Connection, adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>) -> Result<Never, DeviceTrackerError> {
     let mut keyboard = keyboard.listen();
     let mut mouse = mouse.listen();
-    let mut adapter_events = adapter.events().await.unwrap();
+    let mut adapter_events = adapter.events().await?;
 
     connection.object_server().at("/us/colbystuff/Bluekey/devices", zbus::fdo::ObjectManager).await.unwrap();
     
@@ -135,13 +188,13 @@ pub async fn devices_tracker(connection: Connection, adapter: Arc<Adapter>, keyb
 
     loop {
         let (address, notification) = tokio::select! {
-            event = keyboard.next_event() => match event? {
+            event = keyboard.next_event() => match event.map_err(|e| DeviceTrackerError::Keyboard(e))? {
                 KeyboardReturnEvent::Register(address) => (address, Notification::KeyboardAvailable),
                 KeyboardReturnEvent::Suspend(address) => (address, Notification::Suspend),
                 KeyboardReturnEvent::Wake(address) => (address, Notification::Wake),
                 _ => continue
             },
-            event = mouse.next_event() => match event? {
+            event = mouse.next_event() => match event.map_err(|e| DeviceTrackerError::Mouse(e))? {
                 MouseReturnEvent::Register(address) => (address, Notification::MouseAvailable),
                 MouseReturnEvent::Suspend(address) => (address, Notification::Suspend),
                 MouseReturnEvent::Wake(address) => (address, Notification::Wake),

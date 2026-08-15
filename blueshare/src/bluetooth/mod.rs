@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, hash_map::Entry}, fmt::Debug};
+use std::{collections::{HashMap, hash_map::Entry}, fmt::{Debug, Display}};
 
 use bluer::Address;
 use tokio::sync::broadcast;
@@ -72,10 +72,20 @@ impl<T: Default, E: From<Register> + Debug> DeviceMap<T, E> {
     }
 }
 
+
 pub enum ReturnError {
     ServerDied,
     Lagged(u64)
 }
+impl std::fmt::Display for ReturnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ServerDied => write!(f, "server died"),
+            Self::Lagged(_) => write!(f, "server lagged out")
+        }
+    }
+}
+
 pub struct ReturnEventListener<T> {
     receiver: broadcast::Receiver<T>   
 }
@@ -88,3 +98,24 @@ impl<T: Copy> ReturnEventListener<T> {
         }
     }
 }
+
+pub enum ServerError {
+    BluerError(bluer::Error),
+    AdapterLost
+}
+impl From<bluer::Error> for ServerError {
+    fn from(value: bluer::Error) -> Self {
+        ServerError::BluerError(value)
+    }
+}
+impl Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BluerError(error) => write!(f, "Error in server: {}", error),
+            Self::AdapterLost => write!(f, "Error in server: Lost adapter event stream")
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Never {}

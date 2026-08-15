@@ -5,16 +5,16 @@ use std::sync::{Arc, Weak};
 use crate::bluetooth::leds::Led;
 use crate::bluetooth::{DeviceMap, Register, ReturnEventListener};
 
-use super::Target;
+use super::{Target, ServerError, Never};
 
 use super::hid::{self, Protocol};
 use super::hid::characteristics::callback;
 
 use bluer::{AdapterEvent, Address};
 use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, ReqError, Service, characteristic_control}}};
-use futures::{StreamExt, pin_mut};
+use futures::{FutureExt, StreamExt, pin_mut};
 use tokio::sync::{RwLock, mpsc, broadcast};
-use log::{debug, info};
+use log::{debug, info, warn};
 use tokio::task::JoinHandle;
 
 
@@ -40,6 +40,8 @@ impl From<Register> for KeyboardReturnEvent {
     }
 }
 
+
+
 #[derive(Clone, Copy, Debug)]
 pub struct KeyboardServerDied;
 #[derive(Clone, Copy, Debug)]
@@ -53,7 +55,7 @@ pub struct Keyboard {
     _returns: broadcast::Receiver<KeyboardReturnEvent>, 
     returns_sender: broadcast::Sender<KeyboardReturnEvent>,
     state: Weak<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>,
-    handle: JoinHandle<()>
+    handle: JoinHandle<Result<Never, ServerError >>
 }
 impl Keyboard {
     pub fn new(adapter: Arc<Adapter>) -> Keyboard {
@@ -62,7 +64,9 @@ impl Keyboard {
 
         // Create the keyboard server
         let server_state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
-        let handle = tokio::spawn(keyboard_server(keyboard_receiver, return_sender.clone(), adapter, server_state.clone()));
+        let handle = tokio::spawn(keyboard_server(keyboard_receiver, return_sender.clone(), adapter, server_state.clone()).inspect(|error| {
+            warn!("{}", error.as_ref().unwrap_err())
+        }));
 
         Keyboard { channel: keyboard_sender, _returns: return_receiver, returns_sender: return_sender, state: Arc::downgrade(&server_state), handle }
     }
@@ -107,9 +111,11 @@ impl Keyboard {
 
     }
 
-    pub async fn close(&mut self) {
-        (&mut self.handle).await.unwrap();
+    pub async fn close(&mut self) -> Result<Never, ServerError> {
+        (&mut self.handle).await.unwrap() // Propagate panic
     }
+
+    
 }
 impl Drop for Keyboard {
     fn drop(&mut self) {
@@ -191,8 +197,9 @@ const DEFAULT_STATE: KeyboardState = KeyboardState {
     report: None
 };
 
-async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: broadcast::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>) {
-    let disconnect_events = adapter.events().await.expect("Couldn't monitor adapter events").filter_map(async |event|{
+
+async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: broadcast::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>) -> Result<Never, ServerError > {
+    let disconnect_events = adapter.events().await?.filter_map(async |event|{
         match event {
             AdapterEvent::DeviceRemoved(address) => Some(address),
             _ => None
@@ -200,19 +207,19 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
     });
     
     // Start advertising the keyboard functionality
-    let advertisement_handle = adapter.advertise(Advertisement {
+    let _advertisement_handle = adapter.advertise(Advertisement {
        advertisement_type: bluer::adv::Type::Peripheral,
        service_uuids: [hid::definitions::SERVICE].into(),
        discoverable: Some(true),
        appearance: Some(0x03C1),
 
        ..Default::default()
-    }).await.expect("Error creating advertisement");
+    }).await?;
 
     // Create the GATT service
     let (mut boot_input_control, boot_input_handle) = characteristic_control();
     let (mut report_input_control, report_input_handle) = characteristic_control();
-    let application_handle = adapter.serve_gatt_application(Application {
+    let _application_handle = adapter.serve_gatt_application(Application {
         services: vec![Service {
             uuid: hid::definitions::SERVICE,
             primary: true,
@@ -320,7 +327,7 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
             ..Default::default()
         }],
         ..Default::default()
-    }).await.expect("Failed to start GATT server");
+    }).await?;
 
     // Combine the streams
     enum Event {
@@ -333,21 +340,22 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
     pin_mut!(disconnect_events);
     let mut events = async move || {
         tokio::select! {
-            event = receiver.recv() => event.map(|event| Event::Keyboard(event)),
+            event = receiver.recv() => Ok::<Event, ServerError>(Event::Keyboard(event.expect("Keyboard event stream dropped without aborting server"))),
             event = boot_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Some(Event::BootReportNotify(writer)),
-                _ => panic!("Invalid")
+                Some(CharacteristicControlEvent::Notify(writer)) => Ok(Event::BootReportNotify(writer)),
+                _ => unreachable!()
             },
             event = report_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Some(Event::ReportNotify(writer)),
-                _ => panic!("Invalid")
+                Some(CharacteristicControlEvent::Notify(writer)) => Ok(Event::ReportNotify(writer)),
+                _ => unreachable!()
             },
-            event = disconnect_events.next() => Some(Event::DeviceDisconnect(event.expect("Adapter event stream error.")))
+            event = disconnect_events.next() => Ok(Event::DeviceDisconnect(event.ok_or(ServerError::AdapterLost)?))
         }
     };
 
     info!("Successfully created keyboard server");
-    while let Some(event) = events().await {
+    loop {
+        let event = events().await?;
         let mut state = state.write().await;
         match event {
             Event::Keyboard(KeyboardEvent::PressKey(target, keycode)) => {
@@ -393,8 +401,8 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
         }
     }
 
-    drop(advertisement_handle);
-    drop(application_handle);
+
+
 }
 
 

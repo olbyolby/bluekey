@@ -143,7 +143,7 @@ impl KeyboardBridge {
         (&mut self.handle).await.unwrap() // Propgate panics
     }
     pub async fn wait_for_break(mut self) -> Result<BreakReason, EvdevBridgeError> {
-        (&mut self.handle).await.unwrap()
+        (&mut self.handle).await.unwrap() // Propgate panics
     }
 }
 impl Drop for KeyboardBridge {

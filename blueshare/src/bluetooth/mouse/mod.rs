@@ -4,15 +4,17 @@ use bluer::{AdapterEvent, Address};
 use bluer::gatt::CharacteristicWriter;
 use bluer::gatt::local::{Application, CharacteristicControlEvent, ReqError, Service};
 use bluer::{Adapter, adv::Advertisement, gatt::local::characteristic_control};
-use futures::{StreamExt, pin_mut};
-use log::{debug, info};
+use futures::{FutureExt, StreamExt, pin_mut};
+use log::{debug, info, warn};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 use crate::bluetooth::{DeviceMap, Register, ReturnEventListener};
 
+use super::{Target, ServerError, Never};
+
 use super::hid::{self, Protocol};
 use super::hid::characteristics::callback;
-use super::Target;
+
 
 mod data;
 
@@ -77,7 +79,7 @@ pub struct Mouse {
     channel: mpsc::Sender<MouseEvent>,
     _returns: broadcast::Receiver<MouseReturnEvent>,
     returns_sender: broadcast::Sender<MouseReturnEvent>,
-    handle: tokio::task::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<Result<Never, ServerError>>,
     state: Weak<RwLock<MouseServer>>
 }
 
@@ -88,7 +90,9 @@ impl Mouse {
 
         // Create the mouse server
         let state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
-        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender.clone(), adapter, state.clone()));
+        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender.clone(), adapter, state.clone()).inspect(|error| {
+            warn!("{}", error.as_ref().unwrap_err())
+        }));
 
         Mouse {
             channel: mouse_sender,
@@ -232,7 +236,7 @@ const DEFAULT_STATE: IndividualMouse = IndividualMouse {
     report: None
 };
 
-async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: broadcast::Sender<MouseReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>) {
+async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: broadcast::Sender<MouseReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>) -> Result<Never, ServerError> {
     let disconnect_events = adapter.events().await.expect("Couldn't monitor adapter events").filter_map(async |event|{
         match event {
             AdapterEvent::DeviceRemoved(address) => Some(address),
@@ -241,19 +245,19 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
     });
 
     // Start advertising the keyboard functionality
-    let advertisement_handle = adapter.advertise(Advertisement {
+    let _advertisement_handle = adapter.advertise(Advertisement {
        advertisement_type: bluer::adv::Type::Peripheral,
        service_uuids: [hid::definitions::SERVICE].into(),
        discoverable: Some(true),
        appearance: Some(0x03c2),
 
        ..Default::default()
-    }).await.expect("Error creating advertisement");
+    }).await?;
     
     // Create the GATT service
     let (mut boot_input_control, boot_input_handle) = characteristic_control();
     let (mut report_input_control, report_input_handle) = characteristic_control();
-    let application_handle = adapter.serve_gatt_application(Application {
+    let _application_handle = adapter.serve_gatt_application(Application {
         services: vec![Service {
             uuid: hid::definitions::SERVICE,
             primary: true,
@@ -309,7 +313,7 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
             ..Default::default()
         }],
         ..Default::default()
-    }).await.expect("Failed to start GATT server");
+    }).await?;
     drop(adapter);
 
 
@@ -324,23 +328,21 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
     let mut events = async move || {
         tokio::select! {
             event = boot_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Some(Event::BootReportNotify(writer)),
-                _ => panic!("Invalid")
+                Some(CharacteristicControlEvent::Notify(writer)) => Ok::<Event, ServerError>(Event::BootReportNotify(writer)),
+                _ => unreachable!("Invalid")
             },
             event = report_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Some(Event::ReportNotify(writer)),
-                _ => panic!("Invalid")
+                Some(CharacteristicControlEvent::Notify(writer)) => Ok(Event::ReportNotify(writer)),
+                _ => unreachable!("Invalid")
             },
-            event = receiever.recv() => match event {
-                Some(event) => Some(Event::MouseEvent(event)),
-                None => None
-            },
-            event = disconnect_events.next() => Some(Event::DeviceDisconnect(event.expect("Adapter event stream error.")))
+            event = receiever.recv() => Ok(Event::MouseEvent(event.expect("??"))),
+            event = disconnect_events.next() => Ok(Event::DeviceDisconnect(event.ok_or(ServerError::AdapterLost)?))
         }
     };
 
     info!("Successfully created mouse server");
-    while let Some(event) = events().await {
+    loop {
+        let event = events().await?;
         let mut state = state.write().await;
         match event {
             Event::BootReportNotify(writer) => {
@@ -384,6 +386,4 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
         }
     }
 
-    drop(advertisement_handle);
-    drop(application_handle);
 }

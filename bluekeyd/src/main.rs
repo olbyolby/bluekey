@@ -1,15 +1,42 @@
-use std::{collections::{HashMap, hash_map::Entry}, ops::Deref, path::Path, str::FromStr, sync::Arc};
+use std::{
+    collections::{
+        HashMap, 
+        hash_map::Entry
+    }, fmt::Pointer, ops::Deref, path::Path, str::FromStr, sync::Arc,
+};
 
+use never_say_never::Never;
 use bluer::{Adapter, AdapterEvent, Address};
 use evdev::KeyCode;
 use futures::{Stream, StreamExt, pin_mut};
-use log::{info, warn};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc};
-use zbus::{Connection, fdo::NameOwnerChangedStream, interface, message::Header, names::OwnedUniqueName, object_server::SignalEmitter};
+use tokio::{select, sync::{Mutex, mpsc}};
+use zbus::{
+    Connection, 
+    fdo::NameOwnerChanged, 
+    interface, 
+    message::Header, 
+    names::OwnedUniqueName, 
+    object_server::SignalEmitter
+};
 
-use blueshare::{bluetooth::{Target, keyboard::Keyboard, mouse::Mouse}, evdev_bridge::{SharedShortcut, Shortcut}};
-use blueshare::evdev_bridge::{EvdevBridgeError, KeyboardBridge, MouseBridge};
+use blueshare::{
+    bluetooth::{
+        Target, 
+        keyboard::Keyboard, 
+        mouse::Mouse
+    },
+    evdev_bridge::{
+        SharedShortcut, 
+        Shortcut,
+        EvdevBridgeError,
+        KeyboardBridge,
+        MouseBridge
+    }
+};
+
+
 
 mod devices;
 
@@ -58,10 +85,58 @@ impl Bridge {
     }
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+enum CleanerError {
+    EmitterError(zbus::Error),
+    DbusError(zbus::Error),
+    BluetoothError(bluer::Error),
+    StreamError
+}
+impl From<bluer::Error> for CleanerError {
+    fn from(value: bluer::Error) -> Self {
+        Self::BluetoothError(value)
+    }
+}
+impl From<zbus::Error> for CleanerError {
+    fn from(value: zbus::Error) -> Self {
+        Self::DbusError(value)
+    }
+}
 
+enum BluekeyError {
+    Cleaner(CleanerError),
+    DeviceTracker(devices::DeviceTrackerError)
+}
+impl From<CleanerError> for BluekeyError {
+    fn from(value: CleanerError) -> Self {
+        Self::Cleaner(value)
+    }
+}
+impl From<devices::DeviceTrackerError> for BluekeyError {
+    fn from(value: devices::DeviceTrackerError) -> Self {
+        Self::DeviceTracker(value)
+    }
+}
+impl std::fmt::Display for BluekeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cleaner(c) => c.fmt(f),
+            Self::DeviceTracker(d) => d.fmt(f)
+        }
+    }
+}
+
+fn unwrap<T>(result: Result<Never, T>) -> T {
+    match result {
+        Err(e) => e
+    }
+}
+
+type Bridges = Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>;
 struct Bluekey {
     bridge_id_source: IdSource,
-    bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>,
+    bridges: Arc<Bridges>,
     bridge_broken_sender: mpsc::Sender<Id>,
     
     escape_shortcut: SharedShortcut,
@@ -69,15 +144,13 @@ struct Bluekey {
     keyboard_server: Arc<Keyboard>,
     mouse_server: Arc<Mouse>
 }
-
-struct LostBus;
-struct DeadChannel;
 impl Bluekey {
-    async fn disconnection_bridge_cleaner(mut source: NameOwnerChangedStream, bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>, connection: Connection) -> Result<(), LostBus> {
-        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").unwrap();
+    async fn disconnection_bridge_cleaner(source: impl Stream<Item=NameOwnerChanged>, bridges: Arc<Bridges>, connection: Connection) -> Result<Never, CleanerError> {
+        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").map_err(|e| CleanerError::EmitterError(e))?;
+        pin_mut!(source);
 
         loop {
-            let change = source.next().await.ok_or(LostBus)?;
+            let change = source.next().await.ok_or(CleanerError::StreamError)?;
 
             let (old_name, new_name) = match change.args() {
                 Ok(args) => (args.old_owner, args.new_owner),
@@ -96,18 +169,18 @@ impl Bluekey {
                         warn!("Bridge with handle {} failed with error: {:?}", handle, error)
                     }
                     
-                    emitter.bridge_broken(handle).await.unwrap();
+                    emitter.bridge_broken(handle).await?;
                     info!("Cleaned handle {} from dead process", handle);
                 }
                 
             }
         }
     }
-    async fn death_bridge_cleaner(mut source: mpsc::Receiver<Id>, bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>, connection: Connection) -> Result<(), DeadChannel> {
-        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").unwrap();
+    async fn death_bridge_cleaner(mut source: mpsc::Receiver<Id>, bridges: Arc<Bridges>, connection: Connection) -> Result<Never, CleanerError> {
+        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").map_err(|e| CleanerError::EmitterError(e))?;
 
         loop {
-            let bridge = source.recv().await.ok_or(DeadChannel)?;
+            let bridge = source.recv().await.ok_or(CleanerError::StreamError)?;
             let mut bridges = bridges.lock().await;
 
             let entry = match bridges.entry(bridge) {
@@ -119,14 +192,14 @@ impl Bluekey {
                 warn!("Bridge with handle {} failed with error: {:?}", bridge, error);
             }
             
-            emitter.bridge_broken(bridge).await.unwrap();
+            emitter.bridge_broken(bridge).await?;
             info!("Cleaned handle {} from escape or error", bridge);
         }
     }
-    async fn device_disconnection_bridge_cleaner(source: impl Stream<Item=AdapterEvent>, bridges: Arc<Mutex<HashMap<Id, (OwnedUniqueName, Bridge)>>>, connection: Connection) -> Result<(), bluer::Error> {
+    async fn device_disconnection_bridge_cleaner(source: impl Stream<Item=AdapterEvent>, bridges: Arc<Bridges>, connection: Connection) -> Result<Never, CleanerError> {
         pin_mut!(source);
 
-        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").unwrap();
+        let emitter = SignalEmitter::new(&connection, "/us/colbystuff/Bluekey").map_err(|e| CleanerError::EmitterError(e))?;
         while let Some(event) = source.next().await {
             if let AdapterEvent::DeviceRemoved(address) = event {
                 let mut bridges = bridges.lock().await;
@@ -135,14 +208,15 @@ impl Bluekey {
                         warn!("Bridge with handle {} failed with error: {:?}", handle, error);
                     }
 
-                    emitter.bridge_broken(handle).await.unwrap();
+                    emitter.bridge_broken(handle).await?;
                 }                
             }
         };
-        Ok(())
+        
+        Err(CleanerError::StreamError)
     }
 
-    async fn start(adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>) -> Result<Connection, zbus::Error> {
+    async fn run(adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>) -> Result<BluekeyError, zbus::Error> {
         let bridges = Arc::new(Mutex::new(HashMap::new()));
         let (sender, reciever) = mpsc::channel(16);
         
@@ -174,12 +248,16 @@ impl Bluekey {
         let dbus = zbus::fdo::DBusProxy::new(&connection).await?;
         let source = dbus.receive_name_owner_changed().await?;
 
-        tokio::spawn(Self::disconnection_bridge_cleaner(source, bridges.clone(), connection.clone()));
-        tokio::spawn(Self::death_bridge_cleaner(reciever, bridges.clone(), connection.clone()));
-        tokio::spawn(Self::device_disconnection_bridge_cleaner(adapter.clone().events().await.unwrap(), bridges.clone(), connection.clone()));
-        tokio::spawn(devices::devices_tracker(connection.clone(), adapter.clone(), keyboard.clone(), mouse.clone()));
-       
-        Ok(connection)
+        
+        Ok(select! {
+            error = Self::disconnection_bridge_cleaner(source, bridges.clone(), connection.clone()) => unwrap(error).into(),
+            error = Self::death_bridge_cleaner(reciever, bridges.clone(), connection.clone()) => unwrap(error).into(),
+            error = Self::device_disconnection_bridge_cleaner(adapter.clone().events().await.unwrap(), bridges.clone(), connection.clone()) => unwrap(error).into(),
+            error = devices::devices_tracker(connection.clone(), adapter.clone(), keyboard.clone(), mouse.clone()) => unwrap(error).into(),
+        })
+        
+
+
     }
 }
 
@@ -290,10 +368,10 @@ async fn main() -> Result<(), zbus::Error> {
 
     let keyboard = Arc::new(Keyboard::new(adapter.clone()));
     let mouse = Arc::new(Mouse::new(adapter.clone()));
-    let connection = Bluekey::start(adapter.clone(), keyboard, mouse).await?;
+    let error = Bluekey::run(adapter.clone(), keyboard, mouse).await?;
     
-    std::future::pending::<()>().await;    
-    drop(connection);
+    error!("Bluekey error, exiting: {}", error);
+    
     
     Ok(())
 }
