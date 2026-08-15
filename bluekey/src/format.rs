@@ -1,6 +1,6 @@
-use std::{io::Write, fmt::Display};
+use std::{fmt::Display, io::Write, ops::Deref};
 
-
+// A grouping of values printed with a seperateor between them 
 pub struct Group<S, T> {
     seperator: T,
     stream: S,
@@ -36,6 +36,7 @@ pub trait Groupable: Sized + Write {
 impl<T: Write> Groupable for T {}
 
 
+// Both the ANSI code to apply a certain formatting and to remove that formatting
 #[derive(Clone, Copy)]
 pub struct AnsiFormat<'a> {
     enter: &'a str,
@@ -52,6 +53,8 @@ impl<'a> AnsiFormat<'a> {
         }
     }
 }
+
+// Wrap a value to use a particular ANSI wrapping when displayed
 pub struct AnsiWrap<'a, T> {
     format: AnsiFormat<'a>,
     body: &'a T
@@ -61,5 +64,10 @@ impl<'a, T: Display> Display for AnsiWrap<'a, T> {
         write!(f, "{}{}{}", self.format.enter, self.body, self.format.exit)
     }
 }
-
+impl<'a, T> Deref for AnsiWrap<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        self.body
+    }
+}
 

@@ -53,6 +53,7 @@ fn parse_name(characters: &mut std::iter::Peekable<impl Iterator<Item = char>>) 
     name
 }
 
+// Parse a keycode define from input-event-codes.h
 fn read_defines(file: std::fs::File, log: &mut std::fs::File) -> impl Iterator<Item=(String, u16)> {
    BufReader::new(file)
         .lines()
@@ -141,6 +142,7 @@ fn main() {
     let mut result = std::fs::File::create(output_directory.join(OUTPUT_PATH)).unwrap();
     let defines: Vec<(String, u16)> = read_defines(file, &mut log).collect();
 
+    // Write both directions of name mapping via a big match string
     writeln!(result, "pub fn evdev_keycode_to_name(code: u16) -> Option<&'static str> {{\n  match code {{").unwrap();
     for (name, value) in defines.iter().cloned() {
         write!(result, "    {} => Some(\"{}\"),\n", value, name).unwrap();

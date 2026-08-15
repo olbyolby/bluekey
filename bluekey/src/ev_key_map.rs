@@ -1,1 +1,2 @@
+// Event dev key names get updated/added with remarkable frequency, so the mapping of names is generated directly from the input-event-codes.h source via via build.rs
 include!(concat!(env!("OUT_DIR"), "/evdev-code-names.rs"));

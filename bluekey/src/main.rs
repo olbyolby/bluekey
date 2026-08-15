@@ -157,11 +157,49 @@ enum Commands {
 #[derive(Args)]
 struct Bridge {
     #[clap(flatten)]
-    devices: Devices,
-    #[arg(long)]
-    /// Mac address of device to connect
-    mac: String,
+    input_device: InputDevices,
+    #[clap(flatten)]
+    remote_device: RemoteDeviceArgs,
 }
+#[derive(Args)]
+#[group(required = true)]
+struct InputDevices {
+
+    #[arg(long)]
+    /// Path to keyboard device to forward
+    keyboard: Option<PathBuf>,
+    
+    #[arg(long)]
+    /// Path to mouse device to forward
+    mouse: Option<PathBuf>,
+}
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct RemoteDeviceArgs {
+    #[arg(long)]
+    /// MAC address of device to bridge input to
+    mac: Option<String>,
+    #[arg(long)]
+    /// Name/alias of device to connect to
+    alias: Option<String>
+}
+impl RemoteDeviceArgs {
+    fn resolve<'a>(&'a self) -> RemoteDevice<'a> {
+        if let Some(mac) = &self.mac {
+            return RemoteDevice::Mac(mac)
+        } if let Some(alias) = &self.alias {
+            return RemoteDevice::Alias(alias)
+        }
+        unreachable!("Clap should not allow more than 2 of these arguments")
+    }
+}
+enum RemoteDevice<'a> {
+    Mac(&'a str),
+    Alias(&'a str)
+}
+
+
+
 #[derive(Args)]
 struct List {
     #[arg(short, long)]
@@ -173,18 +211,6 @@ struct EscapeShortcut {
     shortcut: Option<String>
 }
 
-#[derive(Args)]
-#[group(required = true)]
-struct Devices {
-
-    #[arg(long)]
-    /// Path to keyboard device to forward
-    keyboard: Option<PathBuf>,
-    
-    #[arg(long)]
-    /// Path to mouse device to forward
-    mouse: Option<PathBuf>,
-}
 
 #[derive(Clone)]
 enum DBusError {
@@ -232,8 +258,11 @@ impl<'a> From<ShortcutFormattingError<'a>> for Error<'a> {
 #[derive(Clone)]
 enum Error<'a> {
     AddressFormatting(&'a str, InvalidAddress),
+    NoSuchAlias(&'a str),
+    MultipleAliases(&'a str),
     ShortcutFormatting(ShortcutFormattingError<'a>),
     DbusConnection(&'static str, DBusError),
+    BlueZError(&'static str, bluer::Error),
     Keyboard(zbus::fdo::Error),
     Mouse(zbus::fdo::Error),
 }
@@ -250,14 +279,16 @@ impl<'a> Error<'a> {
 }
 
 impl<'a> Display for Error<'a> {
-   
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AddressFormatting(address, error) => write!(f, "Invalid text \"{}\" in address \"{}\"", error.0, address),
             Self::ShortcutFormatting(error) => error.fmt(f),
             Self::Keyboard(error) => Self::device_error(f, "keyboard", error),
             Self::Mouse(error) => Self::device_error(f, "mouse", error),
-            Self::DbusConnection(stage, e) => write!(f, "DBus error while {}: {}", stage, e)
+            Self::DbusConnection(stage, e) => write!(f, "DBus error while {}: {}", stage, e),
+            Self::BlueZError(stage, e) => write!(f, "Bluer error while {}: {}", stage, e),
+            Self::NoSuchAlias(alias) => write!(f, "No device found with alias \"{}\"", alias),
+            Self::MultipleAliases(alias) => write!(f, "Multiple devices with alias \"{}\"", alias)
         }
     }
 }
@@ -279,23 +310,51 @@ async fn main() {
 
 
 async fn bridge<'a>(cli: &'a Bridge) -> Result<(), Error<'a>> { 
-    // Parse the device's MAC address
-    let (_target, address) = Address::from_str(&cli.mac).map(|address| (address, &cli.mac)).map_err(|e| Error::AddressFormatting(&cli.mac, e))?;
-
     // Establish DBus connection
     let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
     let bridges = BluekeyBridgeProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
     let config = BluekeyConfigProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
 
+    // Establish BlueZ connection
+    let session = bluer::Session::new().await.map_err(|e| Error::BlueZError("establishing BlueZ connection", e))?;
+    let adapter = session.default_adapter().await.map_err(|e| Error::BlueZError("acquiring BlueZ adapter", e))?;
+
+    // Parse the device's MAC address
+    let (_target, address): (Address, std::borrow::Cow<'a, str>) = match cli.remote_device.resolve() {
+        RemoteDevice::Mac(mac) => Address::from_str(mac).map(|address| (address, mac.into())).map_err(|e| Error::AddressFormatting(mac, e))?,
+        RemoteDevice::Alias(alias) => {
+            // Search all the devices for the one specified by the alias
+            let devices = adapter.device_addresses().await.map_err(|e| Error::BlueZError("Getting device list", e))?;
+            let mut found_device = None;
+            for address in devices {
+                let device = adapter.device(address).map_err(|e| Error::BlueZError("getting device handle", e))?;
+                let name = device.alias().await.map_err(|e| Error::BlueZError("getting device name", e))?;
+
+                if name == alias {
+                    if found_device == None {
+                        found_device = Some(address)
+                    } else {
+                        return Err(Error::MultipleAliases(alias))
+                    }
+                }
+            }
+
+            match found_device {
+                None => return Err(Error::NoSuchAlias(alias)),
+                Some(alias) => (alias, alias.to_string().into())
+            }
+        },
+    };
+
     HandleWrapper::wrap(bridges, async |proxy| {
         let mut breakage = proxy.proxy.receive_bridge_broken().await.map_err(|e| Error::DbusConnection("listening for bridge breaks", e.into()))?;
 
-        let mouse = match &cli.devices.mouse {
+        let mouse = match &cli.input_device.mouse {
             Some(mouse) => Some(proxy.bridge_mouse(&mouse, &address).await.map_err(|e| Error::Mouse(e))),
             None => None
         }.transpose()?;
 
-        let keyboard = match &cli.devices.keyboard {
+        let keyboard = match &cli.input_device.keyboard {
             Some(keyboard) => {
                 println!("Press {} to break keyboard grab.", config.keyboard_escape_shortcut().await.map_err(|e| Error::Keyboard(e))?);
                 Some(proxy.bridge_keyboard(&keyboard, &address).await.map_err(|e| Error::Keyboard(e)))
@@ -341,19 +400,26 @@ fn read_field<'a, 'b, T: TryFrom<&'b OwnedValue>>(properties: &'b HashMap<String
     Ok(properties.get(name).ok_or(error.clone())?.try_into().map_err(|_| error)?)
 }
 async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
-    // Establish DBus connection
+    // Establish DBus connection and Bluer connection
     let connection = zbus::Connection::session().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
     let manager = zbus::fdo::ObjectManagerProxy::new(&connection, "us.colbystuff.Bluekey", "/us/colbystuff/Bluekey/devices").await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
+    
+    let bluetooth_session = bluer::Session::new().await.map_err(|e| Error::BlueZError("connecting to BlueZ", e))?;
+    let adapter = bluetooth_session.default_adapter().await.map_err(|e| Error::BlueZError("acquiring Bluetooth adapter", e))?;
 
+    // Some constants for formatting things 
     const STAGE: &'static str = "reading device properties";
     const DIM: format::AnsiFormat<'static> = format::AnsiFormat::new("\x1B[2m", "\x1B[22m");
     const NONE: format::AnsiFormat<'static> = format::AnsiFormat::new("", "");
+
+    // Checking if anything was listed
     let mut had_any = false;
 
     let mut entry = match cli.detailed {
         true => std::io::stdout().into_group("\n"),
         false => std::io::stdout().into_group(", ")
     };
+    // List every device
     for (_, data) in manager.get_managed_objects().await.map_err(|e| Error::DbusConnection("reading active devices", e.into()))? {
         if let Some(interface) = data.get("us.colbystuff.Bluekey.Device1") {
             let address: &str = read_field(interface, "Address", STAGE)?;
@@ -371,7 +437,11 @@ async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
             match cli.detailed {
                 false => write!(entry, "{}", address).unwrap(),
                 true => {
-                    write!(entry, "Address: {}; ", address).unwrap();
+                    // Acquire the name
+                    let device = adapter.device(Address::from_str(&address).unwrap()).map_err(|e| Error::BlueZError("getting device handle", e))?;
+                    let name = device.alias().await.map_err(|e| Error::BlueZError("getting device name", e))?;
+
+                    write!(entry, "Address: {}, Name: {}; ", address, name).unwrap();
                 
                     let mut devices = entry.group(", ");
                     if keyboard {
@@ -386,6 +456,7 @@ async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
         }
     }
 
+    // Termiante the last part of the list(or display that there's none)
     if !had_any {
         println!("No devices connected.");
     } else {
