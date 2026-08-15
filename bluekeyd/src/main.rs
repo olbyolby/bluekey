@@ -263,6 +263,7 @@ impl Bluekey {
 
 #[interface(name = "us.colbystuff.Bluekey.Bridge1")]
 impl Bluekey {
+    /// Createa a new bridge from a mouse device to a bluetooth client 
     async fn bridge_mouse(&mut self, #[zbus(header)] header: Header<'_>, mouse: &Path, mac: &str) -> Result<Id, zbus::fdo::Error> {
         let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
         let mac = Address::from_str(mac).map_err(|_| zbus::fdo::Error::InvalidArgs("Invalid MAC address".into()))?;
@@ -286,6 +287,7 @@ impl Bluekey {
         info!("Started mouse bridge from {} to {} with handle {}", mouse.display(), mac, id);
         Ok(id)
     }
+    /// Create a new keyboard from a keybaord device to a bluetooth client
     async fn bridge_keyboard(&mut self, #[zbus(header)] header: Header<'_>, keyboard: &Path, mac: &str) -> Result<Id, zbus::fdo::Error> {
         let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
         let mac = Address::from_str(mac).map_err(|_| zbus::fdo::Error::InvalidArgs("Invalid MAC address".into()))?;
@@ -312,6 +314,8 @@ impl Bluekey {
         info!("Started keyboard bridge from {} to {} with handle {}", keyboard.display(), mac, id);
         Ok(id)
     }
+
+    /// Destroy a device-bluetooth bridge and stop forwarding events. A client can only break a brige they created.
     async fn destroy_bridge(&mut self, #[zbus(header)] header: Header<'_>, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>, handle: Id) -> Result<(), zbus::fdo::Error> {
         let name = header.sender().ok_or_else(|| zbus::fdo::Error::Failed("No unique sender name".into()))?.clone();
 
@@ -335,6 +339,8 @@ impl Bluekey {
         Ok(())
     }
 
+
+    /// Signifies that a device with a given handle was destroyed
     #[zbus(signal)]
     async fn bridge_broken(emitter: &SignalEmitter<'_>, bridge: Id) -> Result<(), zbus::Error>;
 

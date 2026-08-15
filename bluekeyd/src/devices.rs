@@ -73,21 +73,25 @@ impl Device {
 
 #[interface(name = "us.colbystuff.Bluekey.Device1")]
 impl Device {
+    /// The address of the Bluetooth device, formated as a  standard MAC address.
     #[zbus(property(emits_changed_signal = "const"))]
     fn address(&self) -> &str {
         &self.address
     }
 
+    /// The power status of the Bluetooth device(As per the HID over GATT standard, devices report their power/wake status)
     #[zbus(property)]
     fn power(&self) -> PowerStatus {
         self.power
     }
 
+    /// If the device is listening for keyboard events
     #[zbus(property)]
     fn has_keyboard(&self) -> bool {
         self.has_keyboard
     }
 
+    /// If the device is listening to mouse events
     #[zbus(property)]
     fn has_mouse(&self) -> bool {
         self.has_mouse
