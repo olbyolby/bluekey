@@ -143,15 +143,17 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
-    /// Pass a keyboard or mouse through an emulated Bluetooth device
-    ///
-    /// Note: You may need to run this program with the input group to access
-    /// evdev devices. An easy way to temporarily open a hash with this group is:
-    /// `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash`
+    /// Pass a keyboard or mouse through to a Bluetooth device
+    /// 
+    /// Bridges a physical keyboard and or mouse device over Bluetooth to a connected Bluetooth client, grabbing the keyboard/mouse 
+    /// from the OS, as if the keyboard/mouse were connected directly to the Bluetooth device. 
+    /// Your keyboard/mouse's device file(/dev/input/*) can be found with `sudo evtest`.
+    /// 
     Bridge(Bridge),
     /// List all devices known to Bluekey as listening for keyboard or mouse input
     List(List),
     /// Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard.
+    /// Shortcut formatted as evdev key names seperated by '+'(ex: LEFTMETA+ESC)
     EscapeShortcut(EscapeShortcut)
 }
 #[derive(Args)]
@@ -166,11 +168,11 @@ struct Bridge {
 struct InputDevices {
 
     #[arg(long)]
-    /// Path to keyboard device to forward
+    /// Path to keyboard device to forward(/dev/input/*)
     keyboard: Option<PathBuf>,
     
     #[arg(long)]
-    /// Path to mouse device to forward
+    /// Path to mouse device to forward(/dev/input/*)
     mouse: Option<PathBuf>,
 }
 #[derive(Args)]
@@ -180,7 +182,7 @@ struct RemoteDeviceArgs {
     /// MAC address of device to bridge input to
     mac: Option<String>,
     #[arg(long)]
-    /// Name/alias of device to connect to
+    /// Name/alias of device to bridge input to
     alias: Option<String>
 }
 impl RemoteDeviceArgs {

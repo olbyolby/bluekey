@@ -18,15 +18,40 @@ Commands:
 ```
 Usage: bluekey bridge <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>
 Options:
-      --keyboard <KEYBOARD>  Path to keyboard device to forward
-      --mouse <MOUSE>        Path to mouse device to forward
+      --keyboard <KEYBOARD>  Path to keyboard device to forward(/dev/input/*)
+      --mouse <MOUSE>        Path to mouse device to forward(/dev/input/*)
       --mac <MAC>            MAC address of device to bridge input to
       --alias <ALIAS>        Name/alias of device to connect to
   -h, --help                 Print help (see more with '--help')
 ```
 
+### Listing devices
+```
+Usage: bluekey list [OPTIONS]
 
-The daemon can be started by running it's command without any arguments, `bluekeyd`. To access /dev/input devices, it will need to either be run as root, or, more perferable, as part of the input group, using something like `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash` to use the group temporarily, or a custom user. 
+Options:
+  -d, --detailed  
+  -h, --help      Print help
+```
+
+Bluekey can also provide a list of all connected Bluetooth devices accepting either keyboard or mouse input.
+Running this command without arguments will result in a comma seperated list of MAC addresses, and passing `-d` will show each device's MAC address, it's name, and if it accepts keyboard or mouse input.
+Additionally, Bluetooth HID clients report their power status back to the device(active/sleeping). Sleeping devices will have their MAC address dispayed as gray in the device list.
+
+### Connecting a device
+1. To connect a Bluetooth device, you should first start the `bluekeyd` dameon, which you can run either as root or with the input group(see [staring the daemon](#starting-the-daemon))
+2. You should then pair your device with your computer using either your desktop environment's GUI or something like `bluetoothctl`. Note either the device's name or it's MAC address(see [listing devices](#listing-devices))
+3. Find the `/dev/input/event*` device of your chosen keyboard/mouse, `sudo evtest` can be very useful for this. If you have multiple keyboards or mice, you can chose to use a specific one.
+4. Once you have your Bluetooth device's alias/mac and your keyboard and or mouse's event device, start briding them via `bluekey bridge <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>`
+5. Your keyboard/mouse should now be connected to the Bluetooth device and allow you to interact with it.
+6. Since your keyboard/mouse is being forwarded by `bluekey`, you can't interact with your main OS using it. You can use the escape-shortcut to stop keyboard forwarding(leftmeta/windows + esc by default)
+7. If you have multiple input devices and clients, you can create multiple bridges to different devices simultaniously, if so inclined.
+8. You can also change the keyboard escape shortcut via the `bluekey escape-shortcut [SHORTCUT]` command
+
+*Some devices behave poorly if the keyboard and mouse services are not avalible during pairing(ie Windows), so I suggesting starting `bluekeyd` before pairing, but it is not strictly required for all devices.
+
+### Starting the daemon
+The daemon can be started by running it's command without any arguments, `bluekeyd`. To access `/dev/input devices`, it will need to either be run as root, or, more perferable, as part of the input group, using something like `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash` to use the group temporarily, or a custom user. 
 
 
 ## Implementation
