@@ -237,7 +237,7 @@ impl Bluekey {
                 keyboard_escape_shortcut: escape_shortcut
             };
 
-            zbus::connection::Builder::session()?
+            zbus::connection::Builder::system()?
                 .name("us.colbystuff.Bluekey")?
                 .serve_at("/us/colbystuff/Bluekey", bridges)?
                 .serve_at("/us/colbystuff/Bluekey", config)?

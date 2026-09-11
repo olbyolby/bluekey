@@ -148,6 +148,7 @@ impl DeviceMap {
 
 pub enum DeviceTrackerError {
     Bluer(bluer::Error),
+    LostAdapter,
     Dbus(zbus::Error),
     Keyboard(ReturnError),
     Mouse(ReturnError)
@@ -166,6 +167,7 @@ impl std::fmt::Display for DeviceTrackerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bluer(e) => write!(f, "Bluer error: {}", e),
+            Self::LostAdapter => write!(f, "Lost bluetooth event stream"),
             Self::Dbus(e) => write!(f, "Dbus error: {}", e),
             Self::Keyboard(e) => write!(f, "Keyboard {}", e),
             Self::Mouse(e) => write!(f, "Mouse {}", e)
@@ -208,7 +210,8 @@ pub async fn devices_tracker(connection: Connection, adapter: Arc<Adapter>, keyb
                     devices.remove(address).await;
                     continue
                 },
-                _ => continue
+                Some(_) => continue,
+                None => return Err(DeviceTrackerError::LostAdapter)
             }
         };
 

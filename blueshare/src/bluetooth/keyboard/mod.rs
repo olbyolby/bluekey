@@ -167,6 +167,7 @@ impl KeyboardState {
             report[0] = self.modifiers;
             report[2..].clone_from_slice(&self.keys);
             
+            debug!("?? {:?}", report);
             report
         };
 
