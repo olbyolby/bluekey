@@ -146,6 +146,7 @@ impl DeviceMap {
     
 }
 
+#[derive(Debug)]
 pub enum DeviceTrackerError {
     Bluer(bluer::Error),
     LostAdapter,

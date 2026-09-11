@@ -9,7 +9,7 @@ use never_say_never::Never;
 use bluer::{Adapter, AdapterEvent, Address};
 use evdev::KeyCode;
 use futures::{Stream, StreamExt, pin_mut};
-use log::{error, info, warn};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::{select, sync::{Mutex, mpsc}};
 use zbus::{
@@ -85,6 +85,12 @@ impl Bridge {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum Bus {
+    System,
+    User
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 enum CleanerError {
@@ -104,6 +110,7 @@ impl From<zbus::Error> for CleanerError {
     }
 }
 
+#[derive(Debug)]
 enum BluekeyError {
     Cleaner(CleanerError),
     DeviceTracker(devices::DeviceTrackerError)
@@ -216,7 +223,7 @@ impl Bluekey {
         Err(CleanerError::StreamError)
     }
 
-    async fn run(adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>) -> Result<BluekeyError, zbus::Error> {
+    async fn run(adapter: Arc<Adapter>, keyboard: Arc<Keyboard>, mouse: Arc<Mouse>, bus: Bus) -> Result<BluekeyError, zbus::Error> {
         let bridges = Arc::new(Mutex::new(HashMap::new()));
         let (sender, reciever) = mpsc::channel(16);
         
@@ -237,7 +244,12 @@ impl Bluekey {
                 keyboard_escape_shortcut: escape_shortcut
             };
 
-            zbus::connection::Builder::system()?
+            let bus = match bus {
+                Bus::System => zbus::connection::Builder::system(),
+                Bus::User   => zbus::connection::Builder::session()
+            };
+            println!("????? {:?}", bus);
+            bus?
                 .name("us.colbystuff.Bluekey")?
                 .serve_at("/us/colbystuff/Bluekey", bridges)?
                 .serve_at("/us/colbystuff/Bluekey", config)?
@@ -364,21 +376,46 @@ impl Config {
     }
 }
 
-
+#[derive(Debug)]
+enum Error {
+    Connection(zbus::Error),
+    Bluekey(BluekeyError),
+    Argument(String),
+}
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), zbus::Error> {
+async fn main() -> Result<(), ()> {
+    dameon().await.map_err(|error| match error {
+        Error::Connection(error) => eprintln!("Error connecting to zbus: ${}", error),
+        Error::Bluekey(error) => eprintln!("Error in Bluekey: ${}", error),
+        Error::Argument(error) => eprintln!("${}", error)
+    })
+}
+
+async fn dameon() -> Result<(), Error> {
     env_logger::init();
+
+    let mut args = std::env::args().skip(1);
+    let bus = match args.next().as_deref() {
+        Some("--system") => Bus::System,
+        None => Bus::User,
+
+        Some(arg) => {
+            return Err(Error::Argument(format!("Invalid argument: {}", arg)))
+        }
+    };
 
     let session = bluer::Session::new().await.unwrap();
     let adapter = Arc::new(session.default_adapter().await.unwrap());
 
     let keyboard = Arc::new(Keyboard::new(adapter.clone()));
     let mouse = Arc::new(Mouse::new(adapter.clone()));
-    let error = Bluekey::run(adapter.clone(), keyboard, mouse).await?;
+    let error = Bluekey::run(adapter.clone(), keyboard, mouse, bus).await;
+
+    match error {
+        Ok(bluekey_error) => Err(Error::Bluekey(bluekey_error)),
+        Err(error) => Err(Error::Connection(error))
+    }
     
-    error!("Bluekey error, exiting: {}", error);
-    
-    
-    Ok(())
+
 }

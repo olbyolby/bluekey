@@ -1,0 +1,17 @@
+[Unit]
+Description=Daemon service for Bluekey
+StartLimitIntervalSec=60
+After=bluetooth.target 
+Requires=bluetooth.target
+
+[Service]
+User=bluekey
+Group=bluekey
+Type=dbus
+BusName=us.colbystuff.Bluekey
+ExecStart=/usr/local/bin/bluekeyd --system
+RestartSec=10
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

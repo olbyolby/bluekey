@@ -162,6 +162,8 @@ struct Bridge {
     input_device: InputDevices,
     #[clap(flatten)]
     remote_device: RemoteDeviceArgs,
+    #[arg(long)]
+    user: bool
 }
 #[derive(Args)]
 #[group(required = true)]
@@ -206,11 +208,15 @@ enum RemoteDevice<'a> {
 struct List {
     #[arg(short, long)]
     // List details about each device(keyboard or mouse support)
-    detailed: bool
+    detailed: bool,
+    #[arg(long)]
+    user: bool
 }
 #[derive(Args)]
 struct EscapeShortcut {
-    shortcut: Option<String>
+    shortcut: Option<String>,
+    #[arg(long)]
+    user: bool
 }
 
 
@@ -311,10 +317,13 @@ async fn main() {
     }
 }
 
-
 async fn bridge<'a>(cli: &'a Bridge) -> Result<(), Error<'a>> { 
     // Establish DBus connection
-    let connection = zbus::Connection::system().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+    let connection = match !cli.user {
+        true => zbus::Connection::system().await,
+        false => zbus::Connection::session().await
+    }.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+
     let bridges = BluekeyBridgeProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
     let config = BluekeyConfigProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
 
@@ -404,7 +413,11 @@ fn read_field<'a, 'b, T: TryFrom<&'b OwnedValue>>(properties: &'b HashMap<String
 }
 async fn list<'a>(cli: &'a List) -> Result<(), Error<'a>> {
     // Establish DBus connection and Bluer connection
-    let connection = zbus::Connection::system().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+    let connection = match !cli.user {
+        true => zbus::Connection::system().await,
+        false => zbus::Connection::session().await
+    }.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+
     let manager = zbus::fdo::ObjectManagerProxy::new(&connection, "us.colbystuff.Bluekey", "/us/colbystuff/Bluekey/devices").await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
     
     let bluetooth_session = bluer::Session::new().await.map_err(|e| Error::BlueZError("connecting to BlueZ", e))?;
@@ -487,7 +500,11 @@ async fn escape_shortcut<'a>(cli: &'a EscapeShortcut) -> Result<(), Error<'a>> {
     }).transpose()?;
 
 
-    let connection = zbus::Connection::system().await.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+    let connection = match !cli.user {
+        true => zbus::Connection::system().await,
+        false => zbus::Connection::session().await
+    }.map_err(|e| Error::DbusConnection("establishing DBus connection", e.into()))?;
+
     let config = BluekeyConfigProxy::new(&connection).await.map_err(|e| Error::DbusConnection("connecting to Bluekey", e.into()))?;
 
     match shortcut {

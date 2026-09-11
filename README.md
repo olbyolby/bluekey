@@ -1,12 +1,15 @@
 
 # Bluekey
+
 Bluekey is a command line utility enabling a computer to act as a Bluetooth keyboard and mouse, allowing a single keyboard and mouse to be used with any number of devices supporting Bluetooth.
 
 Bluekey operates as a system daemon, accessible via DBus, enabling multiple keyboards or mice to be bridged to multiple Bluetooth clients.
 
-## Usage 
+## Usage
+
 The Bluekey client can be used as follows.
-```
+
+```text
 Usage: bluekey <COMMAND>
 Commands:
   bridge           Pass a keyboard or mouse through an emulated Bluetooth device
@@ -14,8 +17,10 @@ Commands:
   escape-shortcut  Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard
   help             Print this message or the help of the given subcommand(s)
 ```
+
 ### Creating a bridge
-```
+
+```text
 Usage: bluekey bridge <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>
 Options:
       --keyboard <KEYBOARD>  Path to keyboard device to forward(/dev/input/*)
@@ -26,11 +31,12 @@ Options:
 ```
 
 ### Listing devices
-```
+
+```text
 Usage: bluekey list [OPTIONS]
 
 Options:
-  -d, --detailed  
+  -d, --detailed
   -h, --help      Print help
 ```
 
@@ -39,7 +45,8 @@ Running this command without arguments will result in a comma seperated list of 
 Additionally, Bluetooth HID clients report their power status back to the device(active/sleeping). Sleeping devices will have their MAC address dispayed as gray in the device list.
 
 ### Connecting a device
-1. To connect a Bluetooth device, you should first start the `bluekeyd` dameon, which you can run either as root or with the input group(see [staring the daemon](#starting-the-daemon))
+
+1. To connect a Bluetooth device, you should first start the `bluekeyd` dameon, which you can run either as root or with the input group(see [staring the daemon](#starting-the-daemon-manual))
 2. You should then pair your device with your computer using either your desktop environment's GUI or something like `bluetoothctl`. Note either the device's name or it's MAC address(see [listing devices](#listing-devices))
 3. Find the `/dev/input/event*` device of your chosen keyboard/mouse, `sudo evtest` can be very useful for this. If you have multiple keyboards or mice, you can chose to use a specific one.
 4. Once you have your Bluetooth device's alias/mac and your keyboard and or mouse's event device, start briding them via `bluekey bridge <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>`
@@ -50,12 +57,35 @@ Additionally, Bluetooth HID clients report their power status back to the device
 
 *Some devices behave poorly if the keyboard and mouse services are not avalible during pairing(ie Windows), so I suggesting starting `bluekeyd` before pairing, but it is not strictly required for all devices.
 
-### Starting the daemon
-The daemon can be started by running it's command without any arguments, `bluekeyd`. To access `/dev/input devices`, it will need to either be run as root, or, more perferable, as part of the input group, using something like `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash` to use the group temporarily, or a custom user. 
+### Installing
 
+1. Build Bluekeyd: `cargo build --release`
+2. Install the bluekey binaries:
+  `./target/release/bluekeyd` -> `/usr/local/bin/bluekeyd`
+  `./target/release/bluekey`  -> `/usr/local/bin/bluekey`
+3. Install [system dameon](#system-dameon), if desired.
+
+#### Starting the daemon (manual)
+
+The daemon can be started by running it's command without any arguments, `bluekeyd`. To access `/dev/input devices`, it will need to either be run as root, or, more perferable, as part of the input group, using something like `sudo --preserve-env setpriv --regid $(id -g $USER) --reuid $(id -u $USER) --groups input,$(id -G $USER | sed "s/ /,/g") bash` to use the group temporarily, or a custom user.
+
+Note: When started by a user session, you need to pass the `--user` flag to all `bluekey` commands. In the future, this will be determined automatically.
+
+#### System dameon
+
+Bluekeyd can also be ran as a system dameon, and configured to automatically start up. This has the advantage that you need not manually run `bluekeyd` nor add the `input` group.
+Additionally, this menas any connected Bluetooth devices will always see a keyboard and mouse service, which some devices play poorly with.
+
+1. After installing, move configuration files the required locations:
+  `./bluekey/install/bluekeyd.service` -> `/etc/systemd/system/bluekeyd.service`
+  `./bluekey/install/us.colbystuff.Bluekey.conf` -> `/etc/dbus-1/system.d/us.colbystuff.Bluekey.conf`
+  `./bluekey/install/us.colbystuff.Bluekey.service` ->  `/usr/share/dbus-1/system-services/us.colbystuff.Bluekey.service`
+2. Make a bluekeyd system user: `# useradd -r -s /bin/nologin -M -G input bluekey`
+3. Enable the service: `# systemctl enable --now bluekeyd.service`
 
 ## Implementation
-Bluekey works by hosting a standards-compliant GATT HID service, which is the standard Bluetooth service used by the majority of modern Bluetooth keyboards and mice, and then forwarding input events from the computer over HID as if it were a real input device. Consequently, a computer running Bluekey, to most connected devices, is close to indistinguishable from a real keyboard and mouse, and should work on any platform supporting those devices over Bluetooth. This allows Bluekey to be used almost universally, and without any special software or configuration on remote devices, from PS4s to iPads, or even other computers. 
+
+Bluekey works by hosting a standards-compliant GATT HID service, which is the standard Bluetooth service used by the majority of modern Bluetooth keyboards and mice, and then forwarding input events from the computer over HID as if it were a real input device. Consequently, a computer running Bluekey, to most connected devices, is close to indistinguishable from a real keyboard and mouse, and should work on any platform supporting those devices over Bluetooth. This allows Bluekey to be used almost universally, and without any special software or configuration on remote devices, from PS4s to iPads, or even other computers.
 
 | Feature             | Bluekey         | [HID Client](https://github.com/4ndrej/hidclient) | [EmuBTHID](https://github.com/Alkaid-Benetnash/EmuBTHID) | [Bluetooth Keyboard](https://github.com/SySS-Research/bluetooth-keyboard-emulator) |
 | ------------------- | --------------- | ------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------- |
@@ -70,13 +100,14 @@ Compared to other software developed for this purpose, Bluekey is intended be si
 
 Bluekey also makes use of the [Bluetooth HID over GATT standard](https://www.bluetooth.com/specifications/specs/hid-over-gatt-profile-hogp/), instead of the [Bluetooth Classic HID service](https://www.bluetooth.com/specifications/specs/human-interface-device-profile1-1-2/), which exposes a significantly simpler implementation, reducing bugs and complexity, and, owing to BT Low Energy being more widely used by modern Bluetooth peripherals, thus better supported by software vendors, should experience better support with fewer comparability or implementation errors(like EmuBTHID failing with Apple devices).
 
-## Planned features:
+## Planned features
 
 1. I plan to write a desktop applet for interacting with Bluekey
 2. I'm not sure about a good way to document the DBus interface and sync with zbus
 3. The dameon could use better error handling
 
-## Motivation 
+## Motivation
+
 The primary motivation behind this project is to address situations where a user may be operating multiple devices that they want to use a keyboard or mouse with simultaneously, but without the difficulty of having 2 sets of input devices on their desk, or worse, constantly unpairing and repairing devices, or shuffling around USB plugs. In particular, I(@olbyolby) am using this with my iPad, which I use for art, and I prefer to use a keyboard for input, but don't want to have 2 keyboards on my desk. However, this software should be useful for any other circumstance you need a wireless keyboard/mouse, perhaps if you have a device requiring Bluetooth, but only have wired inputs, or if you wanted use a keyboard/mouse with a console but without having to buy a new keyboard.
 
-I found pre-existing solutions to often be outdated, or to require difficult configuration and expose potential security risks or poor practices(for instance, many require running as root, and, while I doubt HIDClient is exfiltrating your passwords, that is an additional surface for bugs or vulnerabilities), or did not support my device(an iPad), and most did not seem to integrate well with my desired control method(using a simple keyboard shortcut/macro keyboard to switch between devices). Additionally, well I did find several projects utilizing a micro controller as a BT HID device, those tended to be more oriented towards automation instead of pass through, and why should I have to purchase an entire micro controller when my PC already has perfectly good Bluetooth support? Remote control software is also a possibility, but then you are subject to the whims of the developers and if they even support your device,  which, for many use cases, they likely do not(consoles, iPad, etc). As such, I decided I would try to address these problems by developing my own software to do Bluetooth HID emulation, and Bluekey is the result of that. 
+I found pre-existing solutions to often be outdated, or to require difficult configuration and expose potential security risks or poor practices(for instance, many require running as root, and, while I doubt HIDClient is exfiltrating your passwords, that is an additional surface for bugs or vulnerabilities), or did not support my device(an iPad), and most did not seem to integrate well with my desired control method(using a simple keyboard shortcut/macro keyboard to switch between devices). Additionally, well I did find several projects utilizing a micro controller as a BT HID device, those tended to be more oriented towards automation instead of pass through, and why should I have to purchase an entire micro controller when my PC already has perfectly good Bluetooth support? Remote control software is also a possibility, but then you are subject to the whims of the developers and if they even support your device,  which, for many use cases, they likely do not(consoles, iPad, etc). As such, I decided I would try to address these problems by developing my own software to do Bluetooth HID emulation, and Bluekey is the result of that.

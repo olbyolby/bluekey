@@ -73,6 +73,7 @@ impl<T: Default, E: From<Register> + Debug> DeviceMap<T, E> {
 }
 
 
+#[derive(Debug)]
 pub enum ReturnError {
     ServerDied,
     Lagged(u64)
