@@ -46,7 +46,6 @@ impl<T: Default, E: From<Register> + Debug> DeviceMap<T, E> {
         match self.devices.entry(address) {
             Entry::Occupied(device) => device.into_mut(),
             Entry::Vacant(device) => {
-                // So far as I can tell, there is no good way to detect disconnects, so this *will* slowly leak memory, unfortunately
                 let device = device.insert(Default::default());
                 self.return_events.send(Register(address).into()).unwrap();
                 device
