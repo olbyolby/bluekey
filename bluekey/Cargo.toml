@@ -17,3 +17,5 @@ zbus = { version = "5.18.0",  default-features = false, features = ["tokio"] }
 zvariant = "5.13.1"
 blueshare = { path = "../blueshare" }
 libc = "0.2.189"
+never-say-never = "6.6.666"
+thiserror = "2.0.20"

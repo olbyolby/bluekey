@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::{fmt::Display, io::Write, ops::Deref};
 
 // A grouping of values printed with a seperateor between them 
