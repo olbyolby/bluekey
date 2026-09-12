@@ -3,6 +3,7 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, str::FromStr};
 use bluer::{Adapter, Address};
 use futures::StreamExt;
 use clap::Args;
+use log::warn;
 
 
 use crate::commands::AddressError;
@@ -12,6 +13,19 @@ use super::{bluekey::{self, ConnectionBusArgument}, Error};
 
 #[derive(Args)]
 pub struct Bridge {
+    #[clap(flatten)]
+    bus: ConnectionBusArgument,
+
+    #[clap(flatten)]
+    targets: DeviceTarget,
+
+    #[clap(flatten)]
+    remote_device: RemoteDeviceArgs,
+   
+}
+#[derive(Args)]
+#[group(required = true)]
+struct DeviceTarget {
     #[arg(long)]
     /// Path to keyboard device to forward(/dev/input/*)
     keyboard: Option<PathBuf>,
@@ -19,13 +33,6 @@ pub struct Bridge {
     #[arg(long)]
     /// Path to mouse device to forward(/dev/input/*)
     mouse: Option<PathBuf>,
-    
-    #[clap(flatten)]
-    bus: ConnectionBusArgument,
-
-    #[clap(flatten)]
-    remote_device: RemoteDeviceArgs,
-   
 }
 #[derive(Args)]
 #[group(required = true, multiple = false)]
@@ -96,12 +103,12 @@ impl Bridge {
             let mut stdin = std::io::stdin().lock();
 
             // Create the bridges
-            devices.mouse = match &self.mouse {
+            devices.mouse = match &self.targets.mouse {
                 Some(mouse) => Some(bridges.bridge_mouse(mouse, &address.to_string()).await),
                 None => None
             }.transpose()?;
 
-            devices.keyboard = match &self.keyboard {
+            devices.keyboard = match &self.targets.keyboard {
                 Some(keyboard) => {
                     println!("Press {} to break keyboard grab.", config.keyboard_escape_shortcut().await?);
                     Some(bridges.bridge_keyboard(keyboard, &address.to_string()).await)
@@ -114,7 +121,10 @@ impl Bridge {
                 while let Some(signal) = breakage_events.next().await {
                     let args = match signal.args() {
                         Ok(args) => args,
-                        Err(_) => continue
+                        Err(error) => {
+                            warn!("Invalid event from Bluekey; {error}");
+                            continue
+                        }
                     };
 
                     if devices.keyboard == Some(args.id) || devices.mouse == Some(args.id) {

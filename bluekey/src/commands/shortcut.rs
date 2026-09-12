@@ -6,10 +6,10 @@ use super::{Error, bluekey::ConnectionBusArgument, ShortcutFormattingError};
 
 #[derive(Args)]
 pub struct EscapeShortcut {
-    shortcut: Option<String>,
-    
     #[clap(flatten)]
-    bus: ConnectionBusArgument
+    bus: ConnectionBusArgument,
+
+    shortcut: Option<String>,
 }
 
 impl EscapeShortcut {

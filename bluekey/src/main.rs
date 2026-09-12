@@ -1,3 +1,5 @@
+use std::process::ExitCode;
+
 use clap::{Parser, Subcommand};
 
 mod ev_key_map;
@@ -35,7 +37,7 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), ()> {
+async fn main() -> ExitCode {
     env_logger::init();
     let cli = Cli::parse();
 
@@ -46,10 +48,12 @@ async fn main() -> Result<(), ()> {
         Commands::EscapeShortcut(shortcut) => shortcut.execute().await
     };
 
-    if let Err(error) = result {
-        println!("Error: {:?}", error);
-
-        return Err(())
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            println!("{}", error);
+            ExitCode::FAILURE
+        }
     }
-    Ok(())
+
 }

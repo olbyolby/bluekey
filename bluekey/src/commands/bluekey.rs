@@ -5,7 +5,6 @@ use clap::Args;
 
 use crate::ev_key_map;
 
-
 #[proxy(
     interface="us.colbystuff.Bluekey.Bridge1",
     default_service="us.colbystuff.Bluekey",
@@ -50,6 +49,7 @@ pub trait Device {
 }
 
 
+// Representation of a keyboard shortcut, collection of evdev event IDs
 pub struct Shortcut {
     keys: Vec<u16>
 }
@@ -92,20 +92,22 @@ impl Display for Shortcut {
     }
 }
 
+// Type of connection bus chosen by user
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionBus {
     Session,
     System,
     Unspecified
 }
+// Argument for selecting system or session bus
 #[derive(Args)]
 #[group(required = false, multiple = false)]
 pub struct ConnectionBusArgument {
     #[arg(long)]
-    // Use the system's bus
+    /// Use the system's bus
     system: bool,
     #[arg(long)]
-    // Use the user's bus
+    /// Use the user's bus
     user: bool
 }
 impl ConnectionBusArgument {
@@ -119,6 +121,7 @@ impl ConnectionBusArgument {
         }
     }
 
+    // Connect 
     pub async fn connect(&self) -> Result<Connection, super::Error<'_>> {
         use super::BusConnectionError;
         use ConnectionBus::*;

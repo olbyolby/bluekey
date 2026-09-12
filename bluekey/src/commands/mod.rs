@@ -22,7 +22,7 @@ pub enum Error<'a> {
     #[error("{0}")]
     Bluer(BluerError<'a>),
     #[error("{0}")]
-    ShortcutFormatting(ShortcutFormattingError<'a>)
+    ShortcutFormatting(ShortcutFormattingError<'a>),
 }
 impl<'a> From<zbus::fdo::Error> for Error<'a> {
     fn from(value: zbus::fdo::Error) -> Self {
@@ -45,19 +45,19 @@ pub enum BusConnectionError {
 impl Display for BusConnectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::System(None) => write!(f, "us.colbystuff.Bluekey is not available on the system bus."),
-            Self::Session(None) => write!(f, "us.colbystuff.Bluekey is not available on session bus."),
+            Self::System(None) => write!(f, "\"us.colbystuff.Bluekey\" is not available on the system bus."),
+            Self::Session(None) => write!(f, "\"us.colbystuff.Bluekey\" is not available on session bus."),
             Self::System(Some(error)) => write!(f, "Error connecting to system bus: {error}."),
             Self::Session(Some(error)) => write!(f, "Error connecting to sessioin bus: {error}"),
 
             Self::Both(system, session) => {
                 writeln!(f, "Error connecting to DBus interace:")?;
                 match system {
-                    None => write!(f, "us.colbystuff.Bluekey is not available on the system bus."),
+                    None => writeln!(f, "\"us.colbystuff.Bluekey\" is not available on the system bus."),
                     Some(error) => write!(f, "Error connecting to system bus: {error}.")
                 }?;
                 match session {
-                    None => write!(f, "us.colbystuff.Bluekey is not available on session bus."),
+                    None => write!(f, "\"us.colbystuff.Bluekey\" is not available on session bus."),
                     Some(error) => write!(f, "Error connecting to session bus: {error}.")
                 }
             }

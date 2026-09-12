@@ -11,12 +11,14 @@ use super::{bluekey::{ConnectionBusArgument}, Error};
 
 #[derive(Args)]
 pub struct List {
+    #[clap(flatten)]
+    bus: ConnectionBusArgument,
+
+
     #[arg(short, long)]
-    // List details about each device(keyboard or mouse support)
+    // List details about each device
     long: bool,
 
-    #[clap(flatten)]
-    bus: ConnectionBusArgument
 }
 
 impl List{

@@ -12,21 +12,25 @@ The Bluekey client can be used as follows.
 ```text
 Usage: bluekey <COMMAND>
 Commands:
-  bridge           Pass a keyboard or mouse through an emulated Bluetooth device
+  bridge           Pass a keyboard or mouse through to a Bluetooth device
   list             List all devices known to Bluekey as listening for keyboard or mouse input
-  escape-shortcut  Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard
+  escape-shortcut  Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard. Shortcut formatted as evdev key names seperated by '+'(ex: LEFTMETA+ESC)
   help             Print this message or the help of the given subcommand(s)
+Options:
+  -h, --help  Print help
 ```
 
 ### Creating a bridge
 
 ```text
-Usage: bluekey bridge <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>
+Usage: bluekey bridge [OPTIONS] <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>
 Options:
+      --system               Use the system's bus
+      --user                 Use the user's bus
       --keyboard <KEYBOARD>  Path to keyboard device to forward(/dev/input/*)
       --mouse <MOUSE>        Path to mouse device to forward(/dev/input/*)
       --mac <MAC>            MAC address of device to bridge input to
-      --alias <ALIAS>        Name/alias of device to connect to
+      --alias <ALIAS>        Name/alias of device to bridge input to
   -h, --help                 Print help (see more with '--help')
 ```
 
@@ -34,10 +38,12 @@ Options:
 
 ```text
 Usage: bluekey list [OPTIONS]
-
 Options:
-  -d, --detailed
-  -h, --help      Print help
+      --system  Use the system's bus
+      --user    Use the user's bus
+  -l, --long    List details about each device
+  -h, --help    Print help
+[Colby@colbys-desktop bluekey]$ 
 ```
 
 Bluekey can also provide a list of all connected Bluetooth devices accepting either keyboard or mouse input.
@@ -60,9 +66,9 @@ Additionally, Bluetooth HID clients report their power status back to the device
 ### Installing
 
 1. Build Bluekeyd: `cargo build --release`
-2. Install the bluekey binaries:
-  `./target/release/bluekeyd` -> `/usr/local/bin/bluekeyd`
-  `./target/release/bluekey`  -> `/usr/local/bin/bluekey`
+2. Install the bluekey binaries:  
+  `./target/release/bluekeyd` -> `/usr/local/bin/bluekeyd`  
+  `./target/release/bluekey`  -> `/usr/local/bin/bluekey`  
 3. Install [system dameon](#system-dameon), if desired.
 
 #### Starting the daemon (manual)
@@ -76,10 +82,10 @@ Note: When started by a user session, you need to pass the `--user` flag to all 
 Bluekeyd can also be ran as a system dameon, and configured to automatically start up. This has the advantage that you need not manually run `bluekeyd` nor add the `input` group.
 Additionally, this menas any connected Bluetooth devices will always see a keyboard and mouse service, which some devices play poorly with.
 
-1. After installing, move configuration files the required locations:
-  `./bluekey/install/bluekeyd.service` -> `/etc/systemd/system/bluekeyd.service`
-  `./bluekey/install/us.colbystuff.Bluekey.conf` -> `/etc/dbus-1/system.d/us.colbystuff.Bluekey.conf`
-  `./bluekey/install/us.colbystuff.Bluekey.service` ->  `/usr/share/dbus-1/system-services/us.colbystuff.Bluekey.service`
+1. After installing, move configuration files the required locations:  
+  `./bluekey/install/bluekeyd.service` -> `/etc/systemd/system/bluekeyd.service`  
+  `./bluekey/install/us.colbystuff.Bluekey.conf` -> `/etc/dbus-1/system.d/us.colbystuff.Bluekey.conf`  
+  `./bluekey/install/us.colbystuff.Bluekey.service` ->  `/usr/share/dbus-1/system-services/us.colbystuff.Bluekey.service`  
 2. Make a bluekeyd system user: `# useradd -r -s /bin/nologin -M -G input bluekey`
 3. Enable the service: `# systemctl enable --now bluekeyd.service`
 
