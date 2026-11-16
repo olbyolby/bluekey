@@ -1,5 +1,8 @@
 
-use bluer::gatt::local::{Characteristic, CharacteristicControlHandle, CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
+// All HID characteristics require encryption(security mode 1 level 2, as HOGP requires). The host has to pair
+// before using the service, so it subscribes to input reports under its permanent(identity) address, which BlueZ
+// keeps the subscription for across reconnections, instead of a temporary address that is forgotten on disconnect.
+use bluer::gatt::local::{Characteristic, CharacteristicNotify, CharacteristicNotifyFun, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicReadFun, CharacteristicWrite, CharacteristicWriteFun, CharacteristicWriteMethod, Descriptor, DescriptorRead};
 use log::debug;
 use super::definitions;
 
@@ -32,15 +35,17 @@ pub use crate::callback;
 // Required for any HID device implementing the boot protocol, allows host to set which protocol to use
 // Keyboard or mice should default to the boot protocal is supported
 pub fn protocol_mode(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
-    
+
     Characteristic {
         uuid: definitions::characteristics::PROTOCOL_MODE,
         read: Some(CharacteristicRead {
             read: true,
+            encrypt_read: true,
             fun: read,
             ..Default::default()
         }),
         write: Some(CharacteristicWrite {
+            encrypt_write: true,
             write_without_response: true,
             method: CharacteristicWriteMethod::Fun(write),
             ..Default::default()
@@ -54,6 +59,7 @@ pub fn information(descriptor: &'static [u8]) -> Characteristic {
         uuid: definitions::characteristics::INFORMATION,
         read: Some(CharacteristicRead {
             read: true,
+            encrypt_read: true,
             fun: Box::new(move |_request| Box::pin(async move {
                 Ok(descriptor.into())
             })),
@@ -67,6 +73,7 @@ pub fn control_point(write: CharacteristicWriteFun) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::CONTROL_POINT,
         write: Some(CharacteristicWrite { 
+            encrypt_write: true,
             write_without_response: true,
             method: CharacteristicWriteMethod::Fun(write),
             ..Default::default()
@@ -75,34 +82,33 @@ pub fn control_point(write: CharacteristicWriteFun) -> Characteristic {
     }
 }
 // Required HID characteristic for supplying the HID Report descriptor to the host
-pub fn report_map(report_descripter: &'static [u8]) -> Characteristic {
+pub fn report_map(read: CharacteristicReadFun) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::REPORT_MAP,
         read: Some(CharacteristicRead {
             read: true,
-            fun: Box::new(move |_rquest| Box::pin(async move {
-                Ok(report_descripter.into())
-            })),
+            encrypt_read: true,
+            fun: read,
             ..Default::default()
         }),
         ..Default::default()
     }
 }
 // Allows a keyboard to support the boot protocol, used for simpler devices/OSes(like BIOSes or UEFIs)
-pub fn boot_keyboard_input(reader: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
+pub fn boot_keyboard_input(reader: CharacteristicReadFun, notify: CharacteristicNotifyFun) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::boot::keyboard::INPUT,
         read: Some(CharacteristicRead {
             read: true,
+            encrypt_read: true,
             fun: reader,
             ..Default::default()
         }),
         notify: Some(CharacteristicNotify {
             notify: true,
-            method: CharacteristicNotifyMethod::Io,
+            method: CharacteristicNotifyMethod::Fun(notify),
             ..Default::default()
         }),
-        control_handle: handle,
         ..Default::default()
     }
 }
@@ -112,10 +118,12 @@ pub fn boot_keyboard_output(reader: CharacteristicReadFun, writer: Characteristi
         uuid: definitions::characteristics::boot::keyboard::OUTPUT,
         read: Some(CharacteristicRead {
             read: true,
+            encrypt_read: true,
             fun: reader,
             ..Default::default()
         }),
         write: Some(CharacteristicWrite {
+            encrypt_write: true,
             write: true,
             write_without_response: true,
             method: CharacteristicWriteMethod::Fun(writer),
@@ -125,46 +133,47 @@ pub fn boot_keyboard_output(reader: CharacteristicReadFun, writer: Characteristi
     }
 }
 // Allows a mouse to work in boot mode, for things like UEFIs
-pub fn boot_mouse_input(reader: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
+pub fn boot_mouse_input(reader: CharacteristicReadFun, notify: CharacteristicNotifyFun) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::boot::MOUSE_OUTPUT,
         read: Some(CharacteristicRead {
             read: true,
+            encrypt_read: true,
             fun: reader,
             ..Default::default()
         }),
         notify: Some(CharacteristicNotify {
             notify: true,
-            method: CharacteristicNotifyMethod::Io,
+            method: CharacteristicNotifyMethod::Fun(notify),
             ..Default::default()
         }),
-        control_handle: handle,
         ..Default::default()
     }
 }
 // Required HID characteristic for sending HID reports to the host
-pub fn input_report(read: CharacteristicReadFun, handle: CharacteristicControlHandle) -> Characteristic {
+// `report_id` must match the Report ID used for this report in the Report Map (0 = no Report IDs)
+pub fn input_report(read: CharacteristicReadFun, notify: CharacteristicNotifyFun, report_id: u8) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::REPORT,
         read: Some(CharacteristicRead {
             read: true,
+            encrypt_read: true,
             fun: read,
             ..Default::default()
         }),
         notify: Some(CharacteristicNotify {
             notify: true,
-            method: CharacteristicNotifyMethod::Io,
+            method: CharacteristicNotifyMethod::Fun(notify),
             ..Default::default()
         }),
-        control_handle: handle,
         descriptors: vec![Descriptor {
             uuid: definitions::descriptors::REPORT_REFERENCE,
             read: Some(DescriptorRead {
                 read: true,
-                fun: Box::new(|request| {
+                fun: Box::new(move |request| {
                     Box::pin(async move {
-                        debug!("Descirptor for HID_REPORT INPUT read by {}", request.device_address);
-                        Ok([0x00, 0x01].into())
+                        debug!("Descirptor for HID_REPORT INPUT (id {}) read by {}", report_id, request.device_address);
+                        Ok([report_id, 0x01].into())
                     })
                 }),
                 ..Default::default()
@@ -175,15 +184,18 @@ pub fn input_report(read: CharacteristicReadFun, handle: CharacteristicControlHa
     }
 }
 // HID Charactersitc allowing the host to send updates to the device(like LED updates)
-pub fn output_report(read: CharacteristicReadFun, write: CharacteristicWriteFun) -> Characteristic {
+// `report_id` must match the Report ID used for this report in the Report Map (0 = no Report IDs)
+pub fn output_report(read: CharacteristicReadFun, write: CharacteristicWriteFun, report_id: u8) -> Characteristic {
     Characteristic {
         uuid: definitions::characteristics::REPORT,
         read: Some(CharacteristicRead {
             read: true,
+            encrypt_read: true,
             fun: read,
             ..Default::default()
         }),
         write: Some(CharacteristicWrite {
+            encrypt_write: true,
             write: true,
             write_without_response: true,
             method: CharacteristicWriteMethod::Fun(write),
@@ -193,10 +205,10 @@ pub fn output_report(read: CharacteristicReadFun, write: CharacteristicWriteFun)
             uuid: definitions::descriptors::REPORT_REFERENCE,
             read: Some(DescriptorRead {
                 read: true,
-                fun: Box::new(|request| {
+                fun: Box::new(move |request| {
                     Box::pin(async move {
-                        debug!("Descirptor for HID_REPORT OUTPUT read by {}", request.device_address);
-                        Ok([0x00, 0x02].into())
+                        debug!("Descirptor for HID_REPORT OUTPUT (id {}) read by {}", report_id, request.device_address);
+                        Ok([report_id, 0x02].into())
                     })
                 }),
                 ..Default::default()

@@ -6,6 +6,7 @@ use tokio::sync::broadcast;
 pub mod keyboard;
 pub mod mouse;
 pub mod leds;
+pub mod service;
 mod hid;
 
 #[derive(Clone, Copy, Debug)]
@@ -62,7 +63,15 @@ impl<T: Default, E: From<Register> + Debug> DeviceMap<T, E> {
     fn get_targets(&mut self, target: Target) -> impl Iterator<Item=&mut T> {
         match target {
             Target::Broadcast => TargetIter::Broadcast(self.devices.values_mut()),
-            Target::Target(target) => TargetIter::Target(self.get_device_mut(target).map(|device| std::iter::once(device)))
+            Target::Target(target) => {
+                // A bridge targeting a device whose state was dropped(ie a "device removed" event while its address
+                // changed) recreates it instead of silently discarding the input
+                if !self.devices.contains_key(&target) {
+                    self.devices.insert(target, Default::default());
+                    let _ = self.return_events.send(Register(target).into());
+                }
+                TargetIter::Target(self.get_device_mut(target).map(|device| std::iter::once(device)))
+            }
         }
     }
 

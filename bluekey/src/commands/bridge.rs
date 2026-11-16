@@ -1,4 +1,4 @@
-use std::{panic::AssertUnwindSafe, path::PathBuf, str::FromStr};
+use std::{io::IsTerminal, panic::AssertUnwindSafe, path::PathBuf, str::FromStr};
 
 use bluer::{Adapter, Address};
 use futures::StreamExt;
@@ -134,12 +134,17 @@ impl Bridge {
                 Error::LostBluekey
             };
 
-            // Wait for exit
-            println!("Press enter to exit.");
-            tokio::select! {
-                _ = breakage_handle => (),
-                _ = crate::wait_enter::async_wait_enter(&mut stdin) => ()
-            };
+            // Wait for exit. Without a terminal(ie launched from a desktop shortcut), stdin is usually /dev/null and
+            // would read as an immediate "enter", so only the escape shortcut(or a broken bridge) ends it
+            if stdin.is_terminal() {
+                println!("Press enter to exit.");
+                tokio::select! {
+                    _ = breakage_handle => (),
+                    _ = crate::wait_enter::async_wait_enter(&mut stdin) => ()
+                };
+            } else {
+                breakage_handle.await;
+            }
 
             Ok(())
         }).await

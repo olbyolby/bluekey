@@ -1,4 +1,4 @@
-mod data;
+pub(super) mod data;
 
 use std::sync::{Arc, Weak};
 
@@ -7,11 +7,11 @@ use crate::bluetooth::{DeviceMap, Register, ReturnEventListener};
 
 use super::{Target, ServerError, Never};
 
-use super::hid::{self, Protocol};
+use super::hid::{self, Notifiers, NotifyInbox, Protocol};
 use super::hid::characteristics::callback;
 
 use bluer::{AdapterEvent, Address};
-use bluer::{Adapter, adv::Advertisement, gatt::{CharacteristicWriter, local::{Application, CharacteristicControlEvent, ReqError, Service, characteristic_control}}};
+use bluer::{Adapter, gatt::local::{Characteristic, CharacteristicNotifier, CharacteristicNotifyFun}};
 use futures::{FutureExt, StreamExt, pin_mut};
 use tokio::sync::{RwLock, mpsc, broadcast};
 use log::{debug, info, warn};
@@ -53,9 +53,11 @@ pub enum KeyboardTrySendError {
 pub struct Keyboard {
     channel: mpsc::Sender<KeyboardEvent>,
     _returns: broadcast::Receiver<KeyboardReturnEvent>, 
-    returns_sender: broadcast::Sender<KeyboardReturnEvent>,
-    state: Weak<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>,
-    handle: JoinHandle<Result<Never, ServerError >>
+    pub(super) returns_sender: broadcast::Sender<KeyboardReturnEvent>,
+    pub(super) state: Weak<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>,
+    handle: JoinHandle<Result<Never, ServerError >>,
+    // Keyboard specific GATT characteristics, taken once by bluetooth::service::serve
+    characteristics: std::sync::Mutex<Option<Vec<Characteristic>>>
 }
 impl Keyboard {
     pub fn new(adapter: Arc<Adapter>) -> Keyboard {
@@ -64,14 +66,32 @@ impl Keyboard {
 
         // Create the keyboard server
         let server_state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
-        let handle = tokio::spawn(keyboard_server(keyboard_receiver, return_sender.clone(), adapter, server_state.clone()).inspect(|error| {
+
+        // The keyboard's characteristics are served as part of the single, shared HID service(see bluetooth::service)
+        let (boot_input_handle, boot_input_control) = hid::notify_channel();
+        let (report_input_handle, report_input_control) = hid::notify_channel();
+        let characteristics = keyboard_characteristics(server_state.clone(), return_sender.clone(), boot_input_handle, report_input_handle);
+
+        let handle = tokio::spawn(keyboard_server(keyboard_receiver, adapter, server_state.clone(), boot_input_control, report_input_control).inspect(|error| {
             warn!("{}", error.as_ref().unwrap_err())
         }));
 
-        Keyboard { channel: keyboard_sender, _returns: return_receiver, returns_sender: return_sender, state: Arc::downgrade(&server_state), handle }
+        Keyboard {
+            channel: keyboard_sender,
+            _returns: return_receiver,
+            returns_sender: return_sender,
+            state: Arc::downgrade(&server_state),
+            handle,
+            characteristics: std::sync::Mutex::new(Some(characteristics))
+        }
     }
 
-    
+    // Hands the keyboard's GATT characteristics to the shared HID service, can only be taken once
+    pub(super) fn take_characteristics(&self) -> Vec<Characteristic> {
+        self.characteristics.lock().unwrap().take().unwrap_or_default()
+    }
+
+
 
     pub async fn press(&self, target: Target, keycode: u8) -> Result<(), KeyboardServerDied> {
         match self.channel.send(KeyboardEvent::PressKey(target, keycode)).await {
@@ -115,7 +135,7 @@ impl Keyboard {
         (&mut self.handle).await.unwrap() // Propagate panic
     }
 
-    
+
 }
 impl Drop for Keyboard {
     fn drop(&mut self) {
@@ -151,9 +171,7 @@ pub struct KeyboardState {
     modifiers: u8,
     leds: u8,
 
-    protocol: Protocol,
-    boot: Option<CharacteristicWriter>,
-    report: Option<CharacteristicWriter>
+    pub(super) protocol: Protocol
 }
 impl Default for KeyboardState {
     fn default() -> Self {
@@ -161,24 +179,14 @@ impl Default for KeyboardState {
     }
 }
 impl KeyboardState {
-    async fn send_report(&self) {
-        let report = {
-            let mut report = [0; 8];
-            report[0] = self.modifiers;
-            report[2..].clone_from_slice(&self.keys);
-            
-            debug!("?? {:?}", report);
-            report
-        };
+    // Boot and report protocol share the same 8 byte layout for the keyboard
+    async fn send_report(&self, notifiers: &mut Notifiers) {
+        let mut report = [0; 8];
+        report[0] = self.modifiers;
+        report[2..].clone_from_slice(&self.keys);
 
-        let reporter = match self.protocol {
-            Protocol::Boot => &self.boot,
-            Protocol::Report => &self.report
-        };
-        if let Some(reporter) = reporter {
-            reporter.send(&report).await.unwrap();
-        }
-
+        debug!("Keyboard report {:?}", report);
+        notifiers.send(self.protocol, &report).await;
     }
 
     pub fn led_state(&self) -> impl Iterator<Item=(Led, bool)> {
@@ -193,166 +201,114 @@ const DEFAULT_STATE: KeyboardState = KeyboardState {
     modifiers: 0,
     leds: 0,
 
-    protocol: Protocol::Report,
-    boot: None, 
-    report: None
+    protocol: Protocol::Report
 };
 
 
-async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sender: broadcast::Sender<KeyboardReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>) -> Result<Never, ServerError > {
+// Keyboard specific characteristics of the HID service. The shared ones(protocol mode, HID information,
+// control point and report map) are created by bluetooth::service, since there can only be one of each per service.
+fn keyboard_characteristics(state: Arc<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>, return_sender: broadcast::Sender<KeyboardReturnEvent>, boot_input_handle: CharacteristicNotifyFun, report_input_handle: CharacteristicNotifyFun) -> Vec<Characteristic> {
+    vec![
+        hid::characteristics::boot_keyboard_input(
+            callback!(|request| state {
+                let state = state.read().await;
+                let state = state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE);
+
+                debug!("Read boot keyboard by {}", request.device_address);
+                let mut data = vec![state.modifiers, 0x00];
+                data.extend_from_slice(&state.keys);
+                Ok(data)
+            }),
+            boot_input_handle
+        ),
+        hid::characteristics::boot_keyboard_output(
+            callback!(|request| {
+                debug!("Boot keyboard output by {}", request.device_address);
+                Ok(vec![0])
+            }),
+            callback!(|value, request| state {
+                let mut state = state.write().await;
+                let state = state.acquire_device(request.device_address).await;
+
+                debug!("Value {:?} from {}", value, request.device_address);
+                state.leds = value[0];
+                Ok(())
+            })
+        ),
+        hid::characteristics::input_report(
+            callback!(|request| state {
+                let state = state.read().await;
+                let state = state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE);
+
+                debug!("Report read by {}", request.device_address);
+                let mut data = vec![state.modifiers, 0x00];
+                data.extend_from_slice(&state.keys);
+                Ok(data)
+            }),
+            report_input_handle,
+            hid::KEYBOARD_REPORT_ID
+        ),
+        hid::characteristics::output_report(
+            callback!(|request| state {
+                debug!("LEDs read by {:?}", request.device_address);
+                Ok(vec![state.read().await.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).leds])
+            }),
+            callback!(|data, request| state,return_sender {
+                use super::leds::Led;
+
+                let mut state = state.write().await;
+                let device = state.acquire_device(request.device_address).await;
+                debug!("LEDs writen with {:?} by {:?}", data, request.device_address);
+                let now_on = data[0] & !device.leds;
+                let now_off  = device.leds & !data[0];
+                device.leds = data[0];
+                drop(state);
+
+                debug!("off: {:b}, on: {:b}", now_off, now_on);
+                for (offset, led) in (1..=5).map(|i| (i-1, Led::from_usb_id(i).unwrap())) {
+                    if (1<<offset) & now_on != 0 {
+                        debug!("{:?} went on", led);
+                        return_sender.send(KeyboardReturnEvent::LedOn(request.device_address, led)).unwrap();
+                    } else if (1<<offset )& now_off != 0 {
+                        debug!("{:?} went off", led);
+                        return_sender.send(KeyboardReturnEvent::LedOff(request.device_address, led)).unwrap();
+                    }
+                }
+
+                Ok(())
+            }),
+            hid::KEYBOARD_REPORT_ID
+        )
+    ]
+}
+
+async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<DeviceMap<KeyboardState, KeyboardReturnEvent>>>, mut boot_input_control: NotifyInbox, mut report_input_control: NotifyInbox) -> Result<Never, ServerError > {
     let disconnect_events = adapter.events().await?.filter_map(async |event|{
         match event {
             AdapterEvent::DeviceRemoved(address) => Some(address),
             _ => None
         }
     });
-    
-    // Start advertising the keyboard functionality
-    let _advertisement_handle = adapter.advertise(Advertisement {
-       advertisement_type: bluer::adv::Type::Peripheral,
-       service_uuids: [hid::definitions::SERVICE].into(),
-       discoverable: Some(true),
-       appearance: Some(0x03C1),
-
-       ..Default::default()
-    }).await?;
-
-    // Create the GATT service
-    let (mut boot_input_control, boot_input_handle) = characteristic_control();
-    let (mut report_input_control, report_input_handle) = characteristic_control();
-    let _application_handle = adapter.serve_gatt_application(Application {
-        services: vec![Service {
-            uuid: hid::definitions::SERVICE,
-            primary: true,
-            characteristics: vec![
-                hid::characteristics::protocol_mode(
-                    callback!(|request| state {
-                        let state = state.read().await;
-
-                        debug!("Read protocol by {}", request.device_address);
-                        Ok(vec![state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).protocol.into()])
-                    }),
-                    callback!(|value, request| state {
-                        debug!("Write protocal by {} with {:?}", request.device_address, value);
-                        let protocol = match value.get(0) {
-                            Some(0) => Some(Protocol::Boot),
-                            Some(1) => Some(Protocol::Report),
-                            _ => None
-                        };
-                        if let Some(protocol) = protocol {
-                            state.write().await.acquire_device(request.device_address).await.protocol = protocol;
-                        };
-                        Ok(())
-                    })
-                ),
-                hid::characteristics::information(hid::HID_INFORMATION),
-                hid::characteristics::control_point(callback!(|value, request| return_sender {
-                    debug!("Write control point by {} with {:?}", request.device_address, value);
-                    return_sender.send(match value[0] {
-                        0 => Ok(KeyboardReturnEvent::Suspend(request.device_address)),
-                        1 => Ok(KeyboardReturnEvent::Wake(request.device_address)),
-                        _ => Err(ReqError::Failed)
-                    }?).unwrap();
-                    Ok(())
-                })),
-                hid::characteristics::report_map(data::REPORT_DESCRIPTOR),
-                hid::characteristics::boot_keyboard_input(
-                    callback!(|request| state {
-                        let state = state.read().await;
-                        let state = state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE);
-
-                        debug!("Read boot keyboard by {}", request.device_address);
-                        let mut data = vec![state.modifiers, 0x00];
-                        data.extend_from_slice(&state.keys);
-                        Ok(data)
-                    }),
-                    boot_input_handle
-                ),
-                hid::characteristics::boot_keyboard_output(
-                    callback!(|request| {
-                        debug!("Boot keyboard output by {}", request.device_address);
-                        Ok(vec![0])
-                    }),
-                    callback!(|value, request| state {
-                        let mut state = state.write().await;
-                        let state = state.acquire_device(request.device_address).await;
-
-                        debug!("Value {:?} from {}", value, request.device_address);
-                        state.leds = value[0];
-                        Ok(())
-                    })
-                ),
-                hid::characteristics::input_report(
-                    callback!(|request| state {
-                        let state = state.read().await;
-                        let state = state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE);
-
-                        debug!("Report read by {}", request.device_address);
-                        let mut data = vec![state.modifiers, 0x00];
-                        data.extend_from_slice(&state.keys);
-                        Ok(data)
-                    }),
-                    report_input_handle
-                ),
-                hid::characteristics::output_report(
-                    callback!(|request| state {
-                        debug!("LEDs read by {:?}", request.device_address);
-                        Ok(vec![state.read().await.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).leds])
-                    }),
-                    callback!(|data, request| state,return_sender {
-                        use super::leds::Led;
-
-                        let mut state = state.write().await;
-                        let device = state.acquire_device(request.device_address).await;
-                        debug!("LEDs writen with {:?} by {:?}", data, request.device_address);
-                        let now_on = data[0] & !device.leds;
-                        let now_off  = device.leds & !data[0];
-                        device.leds = data[0];
-                        drop(state);
-
-                        debug!("off: {:b}, on: {:b}", now_off, now_on);
-                        for (offset, led) in (1..=5).map(|i| (i-1, Led::from_usb_id(i).unwrap())) {
-                            if (1<<offset) & now_on != 0 {
-                                debug!("{:?} went on", led);
-                                return_sender.send(KeyboardReturnEvent::LedOn(request.device_address, led)).unwrap();
-                            } else if (1<<offset )& now_off != 0 {
-                                debug!("{:?} went off", led);
-                                return_sender.send(KeyboardReturnEvent::LedOff(request.device_address, led)).unwrap();
-                            }
-                        }
-                                                
-                        Ok(())
-                    }), 
-                )
-            ],
-            ..Default::default()
-        }],
-        ..Default::default()
-    }).await?;
 
     // Combine the streams
     enum Event {
         Keyboard(KeyboardEvent),
-        BootReportNotify(CharacteristicWriter),
-        ReportNotify(CharacteristicWriter),
+        BootReportNotify(CharacteristicNotifier),
+        ReportNotify(CharacteristicNotifier),
         DeviceDisconnect(Address)
     }
-    
+
     pin_mut!(disconnect_events);
     let mut events = async move || {
         tokio::select! {
             event = receiver.recv() => Ok::<Event, ServerError>(Event::Keyboard(event.expect("Keyboard event stream dropped without aborting server"))),
-            event = boot_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Ok(Event::BootReportNotify(writer)),
-                _ => unreachable!()
-            },
-            event = report_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Ok(Event::ReportNotify(writer)),
-                _ => unreachable!()
-            },
+            notifier = boot_input_control.next() => Ok(Event::BootReportNotify(notifier)),
+            notifier = report_input_control.next() => Ok(Event::ReportNotify(notifier)),
             event = disconnect_events.next() => Ok(Event::DeviceDisconnect(event.ok_or(ServerError::AdapterLost)?))
         }
     };
+
+    let mut notifiers = Notifiers::new("keyboard");
 
     info!("Successfully created keyboard server");
     loop {
@@ -365,15 +321,15 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                     if (0xE0..=0xE7).contains(&keycode) {
                         let index = keycode - 0xE0;
                         device.modifiers |= 0x1<<index; // Set the modifier's bit field
-                        device.send_report().await;
+                        device.send_report(&mut notifiers).await;
                     } else if !device.keys.contains(&keycode) {
                         if let Some(empty) = device.keys.iter().position(|k| *k == 0) {
                             device.keys[empty] = keycode;
                         };
-                        device.send_report().await;
+                        device.send_report(&mut notifiers).await;
                     }
                 }
-                
+
             },
             Event::Keyboard(KeyboardEvent::ReleaseKey(target, keycode)) => {
                 for device in state.get_targets(target) {
@@ -381,21 +337,15 @@ async fn keyboard_server(mut receiver: mpsc::Receiver<KeyboardEvent>, return_sen
                     if (0xE0..=0xE7).contains(&keycode) {
                         let index = keycode - 0xE0;
                         device.modifiers &= !(0x1<<index); // Clear the modifier's bit field
-                        device.send_report().await;
+                        device.send_report(&mut notifiers).await;
                     } else if let Some(key) = device.keys.iter().position(|k| *k==keycode) {
                         device.keys[key] = 0;
-                        device.send_report().await;
+                        device.send_report(&mut notifiers).await;
                     }
                 }
             },
-            Event::BootReportNotify(writer) => {
-                let address = writer.device_address();
-                state.acquire_device(address).await.boot = Some(writer)
-            },
-            Event::ReportNotify(writer) => {
-                let address = writer.device_address();
-                state.acquire_device(address).await.report = Some(writer)
-            }
+            Event::BootReportNotify(notifier) => notifiers.subscribed(Protocol::Boot, notifier),
+            Event::ReportNotify(notifier) => notifiers.subscribed(Protocol::Report, notifier),
             Event::DeviceDisconnect(address) => {
                 state.disconnect_device(address).await;
             },
