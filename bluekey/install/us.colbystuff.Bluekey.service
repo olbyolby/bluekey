@@ -2,4 +2,4 @@
 Name=us.colbystuff.Bluekey
 Exec=/usr/local/bin/bluekeyd --system
 User=bluekey
-SystemdService=bluekey.service
+SystemdService=bluekeyd.service
