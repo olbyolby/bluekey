@@ -22,7 +22,7 @@ pub mod characteristics {
         }
     }
 
-    
+
 }
 
 // UUID for the HID service

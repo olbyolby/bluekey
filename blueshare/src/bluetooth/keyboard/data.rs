@@ -11,10 +11,11 @@
 // LED structure: Sent by host to update keyboard's LEDs
 //  LED states    : 5 bits, Num lock, Caps Lock, SCroll Lock, Compose, Kana; 1 = on, 0 = off, see "LED Page" of HID usage tables(pg 97)
 //  Buffer        : 3 bits, constant; 000  ^^^ 1 byte total
-pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
+pub(in crate::bluetooth) const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x06,        // Usage (Keyboard)
     0xA1, 0x01,        // Collection (Application)
+    0x85, super::super::hid::KEYBOARD_REPORT_ID, //   Report ID (1)
     0x05, 0x07,        //   Usage Page (Kbrd/Keypad)
     0x19, 0xE0,        //   Usage Minimum (0xE0)
     0x29, 0xE7,        //   Usage Maximum (0xE7)

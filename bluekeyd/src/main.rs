@@ -381,6 +381,7 @@ enum Error {
     Connection(zbus::Error),
     Bluekey(BluekeyError),
     Argument(String),
+    Bluetooth(bluer::Error),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -388,7 +389,8 @@ async fn main() -> Result<(), ()> {
     dameon().await.map_err(|error| match error {
         Error::Connection(error) => eprintln!("Error connecting to zbus: ${}", error),
         Error::Bluekey(error) => eprintln!("Error in Bluekey: ${}", error),
-        Error::Argument(error) => eprintln!("${}", error)
+        Error::Argument(error) => eprintln!("${}", error),
+        Error::Bluetooth(error) => eprintln!("Error registering the Bluetooth HID service: ${}", error)
     })
 }
 
@@ -410,6 +412,9 @@ async fn dameon() -> Result<(), Error> {
 
     let keyboard = Arc::new(Keyboard::new(adapter.clone()));
     let mouse = Arc::new(Mouse::new(adapter.clone()));
+    // One HID service holding both the keyboard and the mouse, kept registered while the daemon runs
+    let _hid_service = blueshare::bluetooth::service::serve(&adapter, &keyboard, &mouse).await
+        .map_err(Error::Bluetooth)?;
     let error = Bluekey::run(adapter.clone(), keyboard, mouse, bus).await;
 
     match error {

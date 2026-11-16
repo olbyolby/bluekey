@@ -5,10 +5,11 @@
 //   X-movement   ; 1 byte, Relative Movement on the X-axis                   ; -127...127
 //   Y-movement   ; 1 byte, Relative Movement on the Y-axis                   ; -127...127
 //   Wheel        ; 1 byte, Relative Movement of the scroll                   ; -127...127
-pub(super) const REPORT_DESCRIPTOR: &'static [u8] = &[
+pub(in crate::bluetooth) const REPORT_DESCRIPTOR: &'static [u8] = &[
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x02,        // Usage (Mouse)
     0xA1, 0x01,        // Collection (Application)
+    0x85, super::super::hid::MOUSE_REPORT_ID, //   Report ID (2)
     0x09, 0x01,        //   Usage (Pointer)
     0xA1, 0x00,        //   Collection (Physical)
     0x05, 0x09,        //     Usage Page (Button)

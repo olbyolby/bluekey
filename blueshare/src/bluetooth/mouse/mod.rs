@@ -1,9 +1,8 @@
 use std::sync::{Arc, Weak};
 
 use bluer::{AdapterEvent, Address};
-use bluer::gatt::CharacteristicWriter;
-use bluer::gatt::local::{Application, CharacteristicControlEvent, ReqError, Service};
-use bluer::{Adapter, adv::Advertisement, gatt::local::characteristic_control};
+use bluer::gatt::local::{Characteristic, CharacteristicNotifier, CharacteristicNotifyFun};
+use bluer::Adapter;
 use futures::{FutureExt, StreamExt, pin_mut};
 use log::{debug, info, warn};
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -12,11 +11,11 @@ use crate::bluetooth::{DeviceMap, Register, ReturnEventListener};
 
 use super::{Target, ServerError, Never};
 
-use super::hid::{self, Protocol};
+use super::hid::{self, Notifiers, NotifyInbox, Protocol};
 use super::hid::characteristics::callback;
 
 
-mod data;
+pub(super) mod data;
 
 #[derive(Clone, Copy, Debug)]
 pub struct InvalidButton;
@@ -78,9 +77,11 @@ impl From<Register> for MouseReturnEvent {
 pub struct Mouse {
     channel: mpsc::Sender<MouseEvent>,
     _returns: broadcast::Receiver<MouseReturnEvent>,
-    returns_sender: broadcast::Sender<MouseReturnEvent>,
+    pub(super) returns_sender: broadcast::Sender<MouseReturnEvent>,
     handle: tokio::task::JoinHandle<Result<Never, ServerError>>,
-    state: Weak<RwLock<MouseServer>>
+    pub(super) state: Weak<RwLock<MouseServer>>,
+    // Mouse specific GATT characteristics, taken once by bluetooth::service::serve
+    characteristics: std::sync::Mutex<Option<Vec<Characteristic>>>
 }
 
 impl Mouse {
@@ -90,7 +91,13 @@ impl Mouse {
 
         // Create the mouse server
         let state = Arc::new(RwLock::new(DeviceMap::new(return_sender.clone())));
-        let handle = tokio::spawn(mouse_server(mouse_receiver, return_sender.clone(), adapter, state.clone()).inspect(|error| {
+
+        // The mouse's characteristics are served as part of the single, shared HID service(see bluetooth::service)
+        let (boot_input_handle, boot_input_control) = hid::notify_channel();
+        let (report_input_handle, report_input_control) = hid::notify_channel();
+        let characteristics = mouse_characteristics(state.clone(), boot_input_handle, report_input_handle);
+
+        let handle = tokio::spawn(mouse_server(mouse_receiver, adapter, state.clone(), boot_input_control, report_input_control).inspect(|error| {
             warn!("{}", error.as_ref().unwrap_err())
         }));
 
@@ -99,8 +106,14 @@ impl Mouse {
             _returns: return_receiver,
             returns_sender: return_sender,
             state: Arc::downgrade(&state),
-            handle
+            handle,
+            characteristics: std::sync::Mutex::new(Some(characteristics))
         }
+    }
+
+    // Hands the mouse's GATT characteristics to the shared HID service, can only be taken once
+    pub(super) fn take_characteristics(&self) -> Vec<Characteristic> {
+        self.characteristics.lock().unwrap().take().unwrap_or_default()
     }
 
     pub async fn press(&self, target: Target, button: Button) -> Result<(), MouseServerDied> {
@@ -137,7 +150,7 @@ impl Mouse {
             Err(mpsc::error::SendError(_)) => Err(MouseServerDied)
         }
     }
-    
+
     pub fn try_moved(&self, target: Target, x: i8, y: i8, scroll: i8) -> Result<(), TryMouseError> {
         match self.channel.try_send(MouseEvent::Movement(target, x, y, scroll)) {
             Ok(_) => Ok(()),
@@ -181,145 +194,84 @@ impl DevicesView {
 }
 
 
-type MouseServer = DeviceMap<IndividualMouse, MouseReturnEvent>;
-struct IndividualMouse {
-    protocol: Protocol,
-    buttons: u8,
-
-    report: Option<CharacteristicWriter>,
-    boot: Option<CharacteristicWriter>
+pub(super) type MouseServer = DeviceMap<IndividualMouse, MouseReturnEvent>;
+pub(super) struct IndividualMouse {
+    pub(super) protocol: Protocol,
+    buttons: u8
 }
 impl IndividualMouse {
-    async fn send_report(&mut self, movement: Option<(i8, i8)>, wheel: Option<i8>) {
+    async fn send_report(&self, notifiers: &mut Notifiers, movement: Option<(i8, i8)>, wheel: Option<i8>) {
         let (mx, my) = movement.unwrap_or((0, 0));
         let wheel = wheel.unwrap_or(0);
-        
-        let (notifier, report) = match self.protocol {
-            Protocol::Boot => (&mut self.boot, &[
+
+        let report = match self.protocol {
+            Protocol::Boot => &[
                 self.buttons, // Current state of buttons
                 mx as u8, // Preserve bit pattern
                 my as u8,
-            ] as &[u8]),
-            Protocol::Report => (&mut self.report, &[
+            ] as &[u8],
+            Protocol::Report => &[
                 self.buttons, // Current state of buttons
                 mx as u8, // Preserve bit pattern
                 my as u8,
                 wheel as u8
-            ] as &[u8])
+            ] as &[u8]
         };
-        //println!("Sending report on protocol {:?} to {:?}", self.protocol, notifier.as_ref().map(|v| v.device_address()));
-
-        if let Some(notifier) = notifier {
-            if let Err(err) = notifier.send(report).await {
-                debug!("ERRR {:?} on {:?}", err, self.protocol);
-            }
-        }
+        notifiers.send(self.protocol, report).await;
     }
 }
 impl Default for IndividualMouse {
     fn default() -> Self {
         IndividualMouse {
             protocol: Protocol::Report,
-            buttons: 0,
-
-            report: None,
-            boot: None
+            buttons: 0
         }   
     }
 }
 
 const DEFAULT_STATE: IndividualMouse = IndividualMouse {
     protocol: Protocol::Report,
-    buttons: 0,
-
-    boot: None,
-    report: None
+    buttons: 0
 };
 
-async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: broadcast::Sender<MouseReturnEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>) -> Result<Never, ServerError> {
+// Mouse specific characteristics of the HID service. The shared ones(protocol mode, HID information,
+// control point and report map) are created by bluetooth::service, since there can only be one of each per service.
+fn mouse_characteristics(state: Arc<RwLock<MouseServer>>, boot_input_handle: CharacteristicNotifyFun, report_input_handle: CharacteristicNotifyFun) -> Vec<Characteristic> {
+    vec![
+        hid::characteristics::boot_mouse_input(
+            callback!(|request| state {
+                let state = state.read().await;
+
+                debug!("Boot report  read by {}", request.device_address);
+                Ok(vec![state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).buttons, 0, 0])
+            }),
+            boot_input_handle
+        ),
+        hid::characteristics::input_report(
+            callback!(|request| state {
+                let state = state.read().await;
+
+                debug!("Report read by {}", request.device_address);
+                Ok(vec![state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).buttons, 0, 0, 0])
+            }),
+            report_input_handle,
+            hid::MOUSE_REPORT_ID
+        )
+    ]
+}
+
+async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, adapter: Arc<Adapter>, state: Arc<RwLock<MouseServer>>, mut boot_input_control: NotifyInbox, mut report_input_control: NotifyInbox) -> Result<Never, ServerError> {
     let disconnect_events = adapter.events().await.expect("Couldn't monitor adapter events").filter_map(async |event|{
         match event {
             AdapterEvent::DeviceRemoved(address) => Some(address),
             _ => None
         }
     });
-
-    // Start advertising the keyboard functionality
-    let _advertisement_handle = adapter.advertise(Advertisement {
-       advertisement_type: bluer::adv::Type::Peripheral,
-       service_uuids: [hid::definitions::SERVICE].into(),
-       discoverable: Some(true),
-       appearance: Some(0x03c2),
-
-       ..Default::default()
-    }).await?;
-    
-    // Create the GATT service
-    let (mut boot_input_control, boot_input_handle) = characteristic_control();
-    let (mut report_input_control, report_input_handle) = characteristic_control();
-    let _application_handle = adapter.serve_gatt_application(Application {
-        services: vec![Service {
-            uuid: hid::definitions::SERVICE,
-            primary: true,
-            characteristics: vec![
-                hid::characteristics::protocol_mode(
-                    callback!(|request| state {
-                        debug!("Read protocol by {}", request.device_address);
-                        Ok(vec![state.read().await.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).protocol.into()])
-                    }),
-                    callback!(|value, request| state {
-                        debug!("Write protocal by {} with {:?}", request.device_address, value);
-                        let protocol = match value.get(0) {
-                            Some(0) => Some(Protocol::Boot),
-                            Some(1) => Some(Protocol::Report),
-                            _ => None
-                        };
-                        if let Some(protocol) = protocol {
-                            state.write().await.acquire_device(request.device_address).await.protocol = protocol;
-                        };
-                        Ok(())
-                    })
-                ),
-                hid::characteristics::information(super::hid::HID_INFORMATION),
-                hid::characteristics::control_point(callback!(|value, request| return_sender {
-                    debug!("Write control point by {} with {:?}", request.device_address, value);
-                    return_sender.send(match value[0] {
-                        0 => Ok(MouseReturnEvent::Suspend(request.device_address)),
-                        1 => Ok(MouseReturnEvent::Wake(request.device_address)),
-                        _ => Err(ReqError::Failed)
-                    }?).unwrap();
-                    Ok(())
-                })),
-                hid::characteristics::report_map(data::REPORT_DESCRIPTOR),
-                hid::characteristics::boot_mouse_input(
-                    callback!(|request| state {
-                        let state = state.read().await;
-
-                        debug!("Boot report  read by {}", request.device_address);
-                        Ok(vec![state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).buttons, 0, 0])
-                    }),
-                    boot_input_handle
-                ),
-                hid::characteristics::input_report(
-                    callback!(|request| state {
-                        let state = state.read().await;
-
-                        debug!("Report read by {}", request.device_address);
-                        Ok(vec![state.get_device(request.device_address).unwrap_or(&DEFAULT_STATE).buttons, 0, 0])
-                    }),
-                    report_input_handle
-                )
-            ],
-            ..Default::default()
-        }],
-        ..Default::default()
-    }).await?;
     drop(adapter);
 
-
     enum Event {
-        BootReportNotify(CharacteristicWriter),
-        ReportNotify(CharacteristicWriter),
+        BootReportNotify(CharacteristicNotifier),
+        ReportNotify(CharacteristicNotifier),
         MouseEvent(MouseEvent),
         DeviceDisconnect(Address)
     }
@@ -327,43 +279,33 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
     pin_mut!(disconnect_events);
     let mut events = async move || {
         tokio::select! {
-            event = boot_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Ok::<Event, ServerError>(Event::BootReportNotify(writer)),
-                _ => unreachable!("Invalid")
-            },
-            event = report_input_control.next() => match event {
-                Some(CharacteristicControlEvent::Notify(writer)) => Ok(Event::ReportNotify(writer)),
-                _ => unreachable!("Invalid")
-            },
+            notifier = boot_input_control.next() => Ok::<Event, ServerError>(Event::BootReportNotify(notifier)),
+            notifier = report_input_control.next() => Ok(Event::ReportNotify(notifier)),
             event = receiever.recv() => Ok(Event::MouseEvent(event.expect("??"))),
             event = disconnect_events.next() => Ok(Event::DeviceDisconnect(event.ok_or(ServerError::AdapterLost)?))
         }
     };
+
+    let mut notifiers = Notifiers::new("mouse");
 
     info!("Successfully created mouse server");
     loop {
         let event = events().await?;
         let mut state = state.write().await;
         match event {
-            Event::BootReportNotify(writer) => {
-                let state = state.acquire_device(writer.device_address()).await;
-                state.boot = Some(writer)
-            },
-            Event::ReportNotify(writer) => {
-                let state = state.acquire_device(writer.device_address()).await;
-                state.report = Some(writer)
-            },
+            Event::BootReportNotify(notifier) => notifiers.subscribed(Protocol::Boot, notifier),
+            Event::ReportNotify(notifier) => notifiers.subscribed(Protocol::Report, notifier),
             Event::DeviceDisconnect(address) => {
                 state.disconnect_device(address).await;
             },
             Event::MouseEvent(event) => match event {
                 MouseEvent::ButtonPress(target, button) => {
-                    
+
                     for device in state.get_targets(target) {
                         // Subtract one from button ID to account for button 1 being at bit 0
                         if (1..=3).contains(&button.into_u16()) && device.buttons & (1<<(button.into_u16()-1)) == 0 {
                             device.buttons |= 1<<(button.into_u16()-1);
-                            device.send_report(None, None).await;
+                            device.send_report(&mut notifiers, None, None).await;
                         }
                     }
                 },
@@ -372,14 +314,21 @@ async fn mouse_server(mut receiever: mpsc::Receiver<MouseEvent>, return_sender: 
                         // Subtract one from button ID to account for button 1 being at bit 0
                         if (1..=3).contains(&button.into_u16()) && device.buttons & (1<<(button.into_u16()-1)) != 0 {
                             device.buttons &= !(1<<(button.into_u16()-1));
-                            device.send_report(None, None).await;
+                            device.send_report(&mut notifiers, None, None).await;
                         }
                     }
-                    
+
                 },
                 MouseEvent::Movement(target, x, y, scroll) => {
+                    // Bridges report movement on every clock tick, even while the mouse sits still. Notifying the host
+                    // of "no movement" 33 times a second uses airtime for nothing, and whenever the host's link slows
+                    // down(busy radio, longer connection interval) those reports queue up in BlueZ and arrive late,
+                    // making the pointer stall and then jump. Relative reports need no zero updates, so skip them.
+                    if x == 0 && y == 0 && scroll == 0 {
+                        continue;
+                    }
                     for device in state.get_targets(target) {
-                        device.send_report(Some((x, y)), Some(scroll)).await
+                        device.send_report(&mut notifiers, Some((x, y)), Some(scroll)).await
                     }
                 },
             }
