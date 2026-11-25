@@ -176,9 +176,15 @@ impl KeyboardState {
             Protocol::Report => &self.report
         };
         if let Some(reporter) = reporter {
-            reporter.send(&report).await.unwrap();
+            if let Err(error) = reporter.send(&report).await {
+                warn!("Failed to send keyboard report to {}: {}", reporter.device_address(), error);
+            }
         }
 
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.report.is_some() || self.boot.is_some()
     }
 
     pub fn led_state(&self) -> impl Iterator<Item=(Led, bool)> {

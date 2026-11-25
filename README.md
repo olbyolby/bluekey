@@ -14,6 +14,7 @@ Usage: bluekey <COMMAND>
 Commands:
   bridge           Pass a keyboard or mouse through to a Bluetooth device
   list             List all devices known to Bluekey as listening for keyboard or mouse input
+  send             Send a string as keyboard input to a Bluetooth device
   escape-shortcut  Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard. Shortcut formatted as evdev key names seperated by '+'(ex: LEFTMETA+ESC)
   help             Print this message or the help of the given subcommand(s)
 Options:
@@ -49,6 +50,24 @@ Options:
 Bluekey can also provide a list of all connected Bluetooth devices accepting either keyboard or mouse input.
 Running this command without arguments will result in a comma separated list of MAC addresses, and passing `--long` will show each device's MAC address, its name, and if it accepts keyboard or mouse input.
 Additionally, Bluetooth HID clients report their power status back to the device(active/sleeping). Sleeping devices will have their MAC address displayed as gray in the device list.
+
+### Sending Text
+
+```text
+Usage: bluekey send [OPTIONS] <--mac <MAC>|--alias <ALIAS>> <TEXT>
+Options:
+      --system          Use the system's bus
+      --user            Use the user's bus
+      --mac <MAC>       MAC address of the target device
+      --alias <ALIAS>   Name/alias of the target device
+      --delay <DELAY>   Delay between key events in milliseconds [default: 10]
+      --enter           Append an Enter key after the text
+  -h, --help            Print help
+```
+
+The `send` command types the given text on a paired and connected Bluetooth device using the emulated HID keyboard.
+Text is interpreted using a US keyboard layout, so characters not available on a US keyboard(for example `é` or emoji) are rejected.
+If characters are dropped on a slow connection, increase `--delay`.
 
 ### Installing
 
