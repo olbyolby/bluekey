@@ -14,6 +14,7 @@ Usage: bluekey <COMMAND>
 Commands:
   bridge           Pass a keyboard or mouse through to a Bluetooth device
   list             List all devices known to Bluekey as listening for keyboard or mouse input
+  send             Send a string as keyboard input to a Bluetooth device
   escape-shortcut  Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard. Shortcut formatted as evdev key names seperated by '+'(ex: LEFTMETA+ESC)
   help             Print this message or the help of the given subcommand(s)
 Options:
@@ -50,20 +51,28 @@ Bluekey can also provide a list of all connected Bluetooth devices accepting eit
 Running this command without arguments will result in a comma separated list of MAC addresses, and passing `--long` will show each device's MAC address, its name, and if it accepts keyboard or mouse input.
 Additionally, Bluetooth HID clients report their power status back to the device(active/sleeping). Sleeping devices will have their MAC address displayed as gray in the device list.
 
-### Connecting a Device
+### Sending Text
 
-1. To connect a Bluetooth device, you should first start the `bluekeyd` daemon, which you can run either as root or with the input group(see [staring the daemon](#starting-the-daemon-manual))
-2. You should then pair your device with your computer using either your desktop environment's GUI or something like `bluetoothctl`. Note either the device's name or it's MAC address(see [listing devices](#listing-devices))
-3. Find the `/dev/input/event*` device of your chosen keyboard/mouse, `sudo evtest` can be very useful for this. If you have multiple keyboards or mice, you can chose to use a specific one.
-4. Once you have your Bluetooth device's alias/mac and your keyboard and or mouse's event device, start bridging them via `bluekey bridge <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>`
-5. Your keyboard/mouse should now be connected to the Bluetooth device and allow you to interact with it.
-6. Since your keyboard/mouse is being forwarded by `bluekey`, you can't interact with your main OS using it. You can use the escape-shortcut to stop keyboard forwarding(leftmeta/windows + esc by default)
-7. If you have multiple input devices and clients, you can create multiple bridges to different devices simultaneously, if so inclined.
-8. You can also change the keyboard escape shortcut via the `bluekey escape-shortcut [SHORTCUT]` command
+```text
+Usage: bluekey send [OPTIONS] <--mac <MAC>|--alias <ALIAS>> <TEXT>
+Options:
+      --system          Use the system's bus
+      --user            Use the user's bus
+      --mac <MAC>       MAC address of the target device
+      --alias <ALIAS>   Name/alias of the target device
+      --delay <DELAY>   Delay between key events in milliseconds [default: 10]
+      --enter           Append an Enter key after the text
+  -h, --help            Print help
+```
 
-*Some devices behave poorly if the keyboard and mouse services are not available during pairing(ie Windows), so I suggesting starting `bluekeyd` before pairing, but it is not strictly required for all devices.
+The `send` command types the given text on a paired and connected Bluetooth device using the emulated HID keyboard.
+Text is interpreted using a US keyboard layout, so characters not available on a US keyboard(for example `é` or emoji) are rejected.
+If characters are dropped on a slow connection, increase `--delay`.
 
 ### Installing
+
+For Arch Linux, bluekey is avalible on the [AUR](https://aur.archlinux.org/packages/bluekey).
+For other distributions, manual instlation is required.
 
 1. Build Bluekeyd: `cargo build --release`
 2. Install the bluekey binaries:  
@@ -81,6 +90,7 @@ Note: When started by a user session, you need to pass the `--user` flag to all 
 
 Bluekeyd can also be run as a system daemon, and configured to automatically start up. This has the advantage that you need not manually run `bluekeyd` nor add the `input` group.
 Additionally, this means any connected Bluetooth devices will always see a keyboard and mouse service, which some devices play poorly with.
+If you installed from the AUR, the dameon service is created automatically, start it with `systemctl start bluekeyd.service`. Otherwise:
 
 1. After installing, move configuration files the required locations:  
   `./bluekey/install/bluekeyd.service` -> `/etc/systemd/system/bluekeyd.service`  
@@ -105,6 +115,19 @@ Bluekey works by hosting a standards-compliant GATT HID service, which is the st
 Compared to other software developed for this purpose, Bluekey is intended to be simpler to implement, easy to use/configure, and to integrate well with both command line and graphical interfaces. Furthermore, Bluekey supports operating as a background daemon, controllable from both DBus and the CLI, allowing you to disconnect, switch devices, or do other activity without constantly starting and stopping the keyboard and mouse services. Running the Bluetooth service continuously eliminates poor behavior in some devices(like Windows computers) when the HID service starts and stops, while also allowing better inflation with other software.
 
 Bluekey also makes use of the [Bluetooth HID over GATT standard](https://www.bluetooth.com/specifications/specs/hid-over-gatt-profile-hogp/), instead of the [Bluetooth Classic HID service](https://www.bluetooth.com/specifications/specs/human-interface-device-profile1-1-2/), which exposes a significantly simpler implementation, reducing bugs and complexity. Furthermore, owing to BT Low Energy being more widely used by modern Bluetooth peripherals, better supported by software vendors, should experience better support with fewer comparability or implementation errors(like EmuBTHID failing with Apple devices).
+
+### Connecting a Device
+
+1. To connect a Bluetooth device, you should first start the `bluekeyd` daemon, which you can run either as root or with the input group(see [staring the daemon](#starting-the-daemon-manual))
+2. You should then pair your device with your computer using either your desktop environment's GUI or something like `bluetoothctl`. Note either the device's name or it's MAC address(see [listing devices](#listing-devices))
+3. Find the `/dev/input/event*` device of your chosen keyboard/mouse, `sudo evtest` can be very useful for this. If you have multiple keyboards or mice, you can chose to use a specific one.
+4. Once you have your Bluetooth device's alias/mac and your keyboard and or mouse's event device, start bridging them via `bluekey bridge <--keyboard <KEYBOARD>|--mouse <MOUSE>> <--mac <MAC>|--alias <ALIAS>>`
+5. Your keyboard/mouse should now be connected to the Bluetooth device and allow you to interact with it.
+6. Since your keyboard/mouse is being forwarded by `bluekey`, you can't interact with your main OS using it. You can use the escape-shortcut to stop keyboard forwarding(leftmeta/windows + esc by default)
+7. If you have multiple input devices and clients, you can create multiple bridges to different devices simultaneously, if so inclined.
+8. You can also change the keyboard escape shortcut via the `bluekey escape-shortcut [SHORTCUT]` command
+
+*Some devices behave poorly if the keyboard and mouse services are not available during pairing(ie Windows), so I suggesting starting `bluekeyd` before pairing, but it is not strictly required for all devices.
 
 ## Planned Features
 

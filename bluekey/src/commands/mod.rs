@@ -4,7 +4,9 @@ use thiserror::Error;
 
 pub mod bluekey;
 pub mod bridge;
+pub mod device;
 pub mod list;
+pub mod send;
 pub mod shortcut;
 
 #[derive(Error, Debug)]

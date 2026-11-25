@@ -10,6 +10,7 @@ mod commands;
 use commands::{
     bridge::Bridge,
     list::List,
+    send::Send,
     shortcut::EscapeShortcut
 };
 
@@ -31,6 +32,11 @@ enum Commands {
     Bridge(Bridge),
     /// List all devices known to Bluekey as listening for keyboard or mouse input
     List(List),
+    /// Send a string as keyboard input to a Bluetooth device
+    ///
+    /// Types the given text on the target device using the emulated HID keyboard.
+    /// The device must be paired and connected, and the text is interpreted using a US keyboard layout.
+    Send(Send),
     /// Set or view the keyboard escape shortcut, used for breaking the keyboard grab from the keyboard.
     /// Shortcut formatted as evdev key names seperated by '+'(ex: LEFTMETA+ESC)
     EscapeShortcut(EscapeShortcut)
@@ -45,6 +51,7 @@ async fn main() -> ExitCode {
     let result = match &cli.command {
         Commands::Bridge(bridge) => bridge.execute().await,
         Commands::List(list) => list.execute().await,
+        Commands::Send(send) => send.execute().await,
         Commands::EscapeShortcut(shortcut) => shortcut.execute().await
     };
 

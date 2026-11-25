@@ -19,6 +19,14 @@ pub trait Bridge {
     fn bridge_broken(&self, id: u64) -> zbus::Result<()>;
 }
 #[proxy(
+    interface="us.colbystuff.Bluekey.Keyboard1",
+    default_service="us.colbystuff.Bluekey",
+    default_path="/us/colbystuff/Bluekey"
+)]
+pub trait Keyboard {
+    async fn send_text(&self, mac: &str, text: &str, delay_ms: u32) -> Result<(), zbus::fdo::Error>;
+}
+#[proxy(
     interface="us.colbystuff.Bluekey.Configuration1",
     default_service="us.colbystuff.Bluekey",
     default_path="/us/colbystuff/Bluekey"

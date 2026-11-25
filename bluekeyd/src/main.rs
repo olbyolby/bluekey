@@ -2,7 +2,7 @@ use std::{
     collections::{
         HashMap, 
         hash_map::Entry
-    }, fmt::Pointer, ops::Deref, path::Path, str::FromStr, sync::Arc,
+    }, fmt::Pointer, ops::Deref, path::Path, str::FromStr, sync::Arc, time::Duration,
 };
 
 use never_say_never::Never;
@@ -33,7 +33,8 @@ use blueshare::{
         EvdevBridgeError,
         KeyboardBridge,
         MouseBridge
-    }
+    },
+    text
 };
 
 
@@ -243,6 +244,9 @@ impl Bluekey {
             let config = Config {
                 keyboard_escape_shortcut: escape_shortcut
             };
+            let keyboard_interface = KeyboardInterface {
+                keyboard: keyboard.clone()
+            };
 
             let bus = match bus {
                 Bus::System => zbus::connection::Builder::system(),
@@ -253,6 +257,7 @@ impl Bluekey {
                 .name("us.colbystuff.Bluekey")?
                 .serve_at("/us/colbystuff/Bluekey", bridges)?
                 .serve_at("/us/colbystuff/Bluekey", config)?
+                .serve_at("/us/colbystuff/Bluekey", keyboard_interface)?
                 .build()
                 .await?
         };
@@ -373,6 +378,27 @@ impl Config {
     fn set_keyboard_escape_shortcut(&self, value: Vec<u16>) {
         let value = value.into_iter().map(|value| KeyCode::new(value)).collect();
         self.keyboard_escape_shortcut.update(Arc::new(value));
+    }
+}
+
+struct KeyboardInterface {
+    keyboard: Arc<Keyboard>
+}
+#[interface(name = "us.colbystuff.Bluekey.Keyboard1")]
+impl KeyboardInterface {
+    /// Type a string on a connected Bluetooth device using the emulated keyboard.
+    async fn send_text(&self, mac: &str, content: &str, delay_ms: u32) -> Result<(), zbus::fdo::Error> {
+        let address = Address::from_str(mac).map_err(|_| zbus::fdo::Error::InvalidArgs("Invalid MAC address".into()))?;
+
+        let devices = self.keyboard.devices().map_err(|_| zbus::fdo::Error::Failed("Keyboard server is not running".into()))?;
+        let ready = devices.get(address, |state| state.map(|state| state.is_ready()).unwrap_or(false)).await;
+        if !ready {
+            return Err(zbus::fdo::Error::Failed(format!("Device {} is not connected or has not enabled keyboard input", address)));
+        }
+
+        let delay = Duration::from_millis(delay_ms.max(1) as u64);
+        text::type_text(&self.keyboard, Target::Target(address), content, delay).await
+            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
     }
 }
 
